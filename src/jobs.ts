@@ -143,7 +143,7 @@ export async function executeCancellationJob(subName: string, agentId: bigint) {
 
   try {
     const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 86400); // 1 day
-    const jobDescription = `Cancel: ${subName}`;
+    const jobDescription = `Cancel subscription: ${subName}`;
 
     // 1. createJob (Owner)
     console.log(`\n[1/6] Creating Job for ${subName}...`);

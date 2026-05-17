@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import * as fs from 'fs';
+import * as path from 'path';
 import { loadSubscriptions, saveSubscriptions, cancelSubscription, Subscription } from './subscriptions.js';
 import { executeCancellationJob, loadJobs } from './jobs.js';
 import { checkAndProcessRenewals } from './checker.js';
 import { initializeAgent } from './agent.js';
-import { ownerAccount, validatorAccount } from './config.js';
+import { ownerAccount, validatorAccount, reinitializeConfig } from './config.js';
 
 const app = express();
 const PORT = 3001;
@@ -53,6 +55,77 @@ app.get('/jobs', (req, res) => {
   try {
     const data = loadJobs();
     res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /setup-keys - hot-reloads private keys into .env and memory
+app.post('/setup-keys', async (req, res) => {
+  try {
+    const { ownerKey, validatorKey } = req.body;
+
+    // Validation: must be valid 0x-prefixed 64-char hex strings (length 66)
+    const hexRegex = /^0x[a-fA-F0-9]{64}$/;
+    if (!ownerKey || !hexRegex.test(ownerKey)) {
+      res.status(400).json({ error: 'Owner Key must be a valid 0x-prefixed 64-character hex string' });
+      return;
+    }
+    if (!validatorKey || !hexRegex.test(validatorKey)) {
+      res.status(400).json({ error: 'Validator Key must be a valid 0x-prefixed 64-character hex string' });
+      return;
+    }
+
+    // 1. Write back to .env preserving other config variables like WEBHOOK_URL
+    const envPath = path.resolve(process.cwd(), '.env');
+    let envContent = '';
+    if (fs.existsSync(envPath)) {
+      envContent = fs.readFileSync(envPath, 'utf8');
+    }
+
+    const lines = envContent.split(/\r?\n/);
+    let ownerUpdated = false;
+    let validatorUpdated = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('OWNER_PRIVATE_KEY=')) {
+        lines[i] = `OWNER_PRIVATE_KEY=${ownerKey}`;
+        ownerUpdated = true;
+      }
+      if (lines[i].startsWith('VALIDATOR_PRIVATE_KEY=')) {
+        lines[i] = `VALIDATOR_PRIVATE_KEY=${validatorKey}`;
+        validatorUpdated = true;
+      }
+    }
+
+    if (!ownerUpdated) lines.push(`OWNER_PRIVATE_KEY=${ownerKey}`);
+    if (!validatorUpdated) lines.push(`VALIDATOR_PRIVATE_KEY=${validatorKey}`);
+
+    fs.writeFileSync(envPath, lines.join('\n'), 'utf8');
+    console.log('✅ Keys successfully updated inside .env file');
+
+    // 2. Refresh process.env and reinitialize config in memory
+    process.env.OWNER_PRIVATE_KEY = ownerKey;
+    process.env.VALIDATOR_PRIVATE_KEY = validatorKey;
+    reinitializeConfig();
+    console.log('✅ Viem Clients successfully reinitialized in memory');
+
+    // 3. Hot-reload agent identity configuration
+    try {
+      agentId = await initializeAgent();
+      console.log(`🤖 Hot-reloaded successfully. New Agent ID: ${agentId.toString()}`);
+    } catch (e: any) {
+      console.warn("⚠️ Hot-reloaded clients, but Identity check returned warning/failure:", e.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Keys successfully saved and activated in memory!',
+      agentId: agentId.toString(),
+      ownerAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
+      validatorAddress: validatorAccount?.address || '0x0000000000000000000000000000000000000000'
+    });
+
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

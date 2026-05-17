@@ -30,27 +30,52 @@ export const publicClient = createPublicClient({
   transport: http(),
 });
 
-const VALIDATOR_PRIVATE_KEY = process.env.VALIDATOR_PRIVATE_KEY as `0x${string}`;
-const OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY as `0x${string}`;
+let VALIDATOR_PRIVATE_KEY = process.env.VALIDATOR_PRIVATE_KEY as `0x${string}`;
+let OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY as `0x${string}`;
 
-export const validatorAccount = VALIDATOR_PRIVATE_KEY && VALIDATOR_PRIVATE_KEY.startsWith('0x') && VALIDATOR_PRIVATE_KEY.length === 66 
+export let validatorAccount = VALIDATOR_PRIVATE_KEY && VALIDATOR_PRIVATE_KEY.startsWith('0x') && VALIDATOR_PRIVATE_KEY.length === 66 
   ? privateKeyToAccount(VALIDATOR_PRIVATE_KEY) 
   : null;
-export const ownerAccount = OWNER_PRIVATE_KEY && OWNER_PRIVATE_KEY.startsWith('0x') && OWNER_PRIVATE_KEY.length === 66 
+export let ownerAccount = OWNER_PRIVATE_KEY && OWNER_PRIVATE_KEY.startsWith('0x') && OWNER_PRIVATE_KEY.length === 66 
   ? privateKeyToAccount(OWNER_PRIVATE_KEY) 
   : null;
 
-export const validatorWalletClient = validatorAccount ? createWalletClient({
+export let validatorWalletClient = validatorAccount ? createWalletClient({
   account: validatorAccount,
   chain: arcTestnet,
   transport: http(),
 }) : null;
 
-export const ownerWalletClient = ownerAccount ? createWalletClient({
+export let ownerWalletClient = ownerAccount ? createWalletClient({
   account: ownerAccount,
   chain: arcTestnet,
   transport: http(),
 }) : null;
+
+export function reinitializeConfig() {
+  VALIDATOR_PRIVATE_KEY = process.env.VALIDATOR_PRIVATE_KEY as `0x${string}`;
+  OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY as `0x${string}`;
+
+  validatorAccount = VALIDATOR_PRIVATE_KEY && VALIDATOR_PRIVATE_KEY.startsWith('0x') && VALIDATOR_PRIVATE_KEY.length === 66 
+    ? privateKeyToAccount(VALIDATOR_PRIVATE_KEY) 
+    : null;
+  ownerAccount = OWNER_PRIVATE_KEY && OWNER_PRIVATE_KEY.startsWith('0x') && OWNER_PRIVATE_KEY.length === 66 
+    ? privateKeyToAccount(OWNER_PRIVATE_KEY) 
+    : null;
+
+  validatorWalletClient = validatorAccount ? createWalletClient({
+    account: validatorAccount,
+    chain: arcTestnet,
+    transport: http(),
+  }) : null;
+
+  ownerWalletClient = ownerAccount ? createWalletClient({
+    account: ownerAccount,
+    chain: arcTestnet,
+    transport: http(),
+  }) : null;
+}
+
 
 // IdentityRegistry ABI (ERC-8004)
 export const IDENTITY_REGISTRY_ADDRESS = '0x8004A818BFB912233c491871b3d84c89A494BD9e';
