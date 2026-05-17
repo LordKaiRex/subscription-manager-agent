@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash, randomUUID } from 'crypto';
 import { loadSubscriptions, saveSubscriptions, cancelSubscription, Subscription } from './subscriptions.js';
 import { executeCancellationJob, loadJobs } from './jobs.js';
 import { checkAndProcessRenewals } from './checker.js';
@@ -30,6 +31,154 @@ let agentId = 1n;
     console.error("❌ Failed to initialize agent in server:", err);
   }
 })();
+
+// Circle API Helper
+async function callCircleAPI(method: string, path: string, body?: any, userToken?: string) {
+  const apiKey = process.env.CIRCLE_API_KEY;
+  if (!apiKey || apiKey === 'YOUR_CIRCLE_API_KEY_HERE') {
+    throw new Error('Circle API Key is not configured in .env');
+  }
+
+  const headers: any = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`
+  };
+  if (userToken) {
+    headers['X-User-Token'] = userToken;
+  }
+
+  const url = `https://api.circle.com${path}`;
+  const response = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error(`Circle API Error [${method} ${path}]:`, errText);
+    throw new Error(`Circle API returned status ${response.status}: ${errText}`);
+  }
+
+  return response.json();
+}
+
+// POST /auth/init - initializes or retrieves a Circle wallet session
+app.post('/auth/init', async (req, res) => {
+  try {
+    const { userEmail } = req.body;
+    if (!userEmail) {
+      res.status(400).json({ error: 'Missing userEmail' });
+      return;
+    }
+
+    const apiKey = process.env.CIRCLE_API_KEY;
+    const appId = process.env.CIRCLE_APP_ID || '';
+
+    // Alphanumeric deterministic user identifier
+    const userId = createHash('sha256').update(userEmail.toLowerCase()).digest('hex');
+
+    // Safe fallback for offline simulation mode
+    if (!apiKey || apiKey.trim() === '') {
+      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating Circle Wallet initialization for ${userEmail}...`);
+      
+      // Determine if a mock wallet already exists in localStorage or simulate a new creation
+      const mockChallengeId = `mock-challenge-id-${userId.substring(0, 8)}`;
+      res.json({
+        simulated: true,
+        userToken: `mock-user-token-${userId.substring(0, 10)}`,
+        encryptionKey: 'mock-encryption-key-for-submanager',
+        appId: appId || 'mock-app-id',
+        challengeId: mockChallengeId, // Always simulate PIN setup on first run
+        walletAddress: null
+      });
+      return;
+    }
+
+    // 1. Create a Circle W3S User record. Catch 409 Conflict gracefully
+    try {
+      await callCircleAPI('POST', '/v1/w3s/users', { userId });
+      console.log(`👤 Circle User created: ${userId}`);
+    } catch (e: any) {
+      console.log(`ℹ️ Circle User registration skipped (already exists): ${e.message}`);
+    }
+
+    // 2. Generate the User Session Token & Encryption Key
+    const tokenRes = await callCircleAPI('POST', '/v1/w3s/users/token', { userId });
+    const { userToken, encryptionKey } = tokenRes.data;
+
+    // 3. Query existing wallets associated with this session token
+    const walletsRes = await callCircleAPI('GET', '/v1/w3s/wallets', undefined, userToken);
+    const wallets = walletsRes.data?.wallets || [];
+
+    if (wallets.length > 0) {
+      console.log(`💼 Existing Circle Wallet found for ${userEmail}: ${wallets[0].address}`);
+      res.json({
+        userToken,
+        encryptionKey,
+        appId,
+        challengeId: null,
+        walletAddress: wallets[0].address
+      });
+    } else {
+      // 4. Initialize User to trigger wallet creation challenge via Web SDK
+      console.log(`🔑 Initializing new user-controlled wallet challenge for ${userEmail}...`);
+      const initRes = await callCircleAPI('POST', '/v1/w3s/user/initialize', {
+        idempotencyKey: randomUUID(),
+        blockchains: ['ARC-TESTNET']
+      }, userToken);
+
+      const { challengeId } = initRes.data;
+      res.json({
+        userToken,
+        encryptionKey,
+        appId,
+        challengeId,
+        walletAddress: null
+      });
+    }
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /auth/wallet - fetches wallet address after SDK challenge succeeds
+app.post('/auth/wallet', async (req, res) => {
+  try {
+    const { userToken } = req.body;
+    if (!userToken) {
+      res.status(400).json({ error: 'Missing userToken' });
+      return;
+    }
+
+    const apiKey = process.env.CIRCLE_API_KEY;
+    if (!apiKey || apiKey.trim() === '') {
+      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating wallet retrieval...`);
+      res.json({
+        walletAddress: '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0',
+        walletId: 'mock-wallet-id',
+        blockchain: 'ARC-TESTNET'
+      });
+      return;
+    }
+
+    const walletsRes = await callCircleAPI('GET', '/v1/w3s/wallets', undefined, userToken);
+    const wallets = walletsRes.data?.wallets || [];
+
+    if (wallets.length === 0) {
+      res.status(404).json({ error: 'No wallet found for this user session' });
+      return;
+    }
+
+    res.json({
+      walletAddress: wallets[0].address,
+      walletId: wallets[0].id,
+      blockchain: 'ARC-TESTNET'
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // GET /agent - returns agent metadata
 app.get('/agent', (req, res) => {

@@ -117,6 +117,101 @@
       }
     }
 
+    // Custom Universal browser-compatible implementation of W3SSdk (Circle Web SDK protocol)
+    class W3SSdk {
+      constructor(configs) {
+        this.configs = configs; // configs is { configs: { appSettings: { appId } } }
+        this.serviceUrl = 'https://pw-auth.circle.com';
+        this.iframe = document.createElement('iframe');
+        this.receivedResponseFromService = false;
+
+        this.messageHandler = (event) => {
+          if (event.origin !== this.serviceUrl) return;
+
+          if (event.data?.onFrameReady) {
+            this.receivedResponseFromService = true;
+            this.iframe.contentWindow.postMessage({
+              w3s: {
+                appSettings: this.configs?.configs?.appSettings || { appId: '' },
+                auth: this.auth || {},
+                challenge: this.challenge || {},
+                customizations: {
+                  securityQuestions: {
+                    questions: [],
+                    requiredCount: 2,
+                  }
+                },
+                deviceInfo: { model: 'Web', version: '1.1.11' }
+              }
+            }, this.serviceUrl);
+          } else if (event.data?.onComplete) {
+            this.closeModal();
+            this.unSubscribeMessage();
+            if (this.onComplete) this.onComplete(undefined, event.data.result);
+          } else if (event.data?.onError) {
+            this.closeModal();
+            this.unSubscribeMessage();
+            if (this.onComplete) this.onComplete(event.data.error, undefined);
+          } else if (event.data?.showUi) {
+            this.iframe.width = '100%';
+            this.iframe.height = '100%';
+            this.iframe.style.zIndex = '2147483647';
+            this.iframe.style.position = 'fixed';
+            this.iframe.style.top = '50%';
+            this.iframe.style.left = '50%';
+            this.iframe.style.transform = 'translate(-50%, -50%)';
+            this.iframe.style.display = 'block';
+          } else if (event.data?.onClose) {
+            this.closeModal();
+            this.unSubscribeMessage();
+          }
+        };
+      }
+
+      setAuthentication(auth) {
+        this.auth = auth; // auth is { userToken, encryptionKey }
+      }
+
+      execute(challengeId, onComplete) {
+        this.challenge = { challengeId };
+        this.onComplete = onComplete;
+
+        // If challengeId starts with 'mock', simulate the successful flow!
+        if (challengeId.startsWith('mock')) {
+          console.log("Simulating Circle Wallet PIN setup...");
+          setTimeout(() => {
+            if (this.onComplete) this.onComplete(undefined, { success: true });
+          }, 1500);
+          return;
+        }
+
+        // Setup message listener
+        window.addEventListener('message', this.messageHandler, false);
+
+        // Append iframe
+        const protocol = window.location.protocol;
+        const host = window.location.host;
+        const fullDomainWithProtocol = protocol.startsWith('http') ? `${protocol}//${host}` : 'http://localhost:3000';
+        this.iframe.src = `${this.serviceUrl}?origin=${fullDomainWithProtocol}`;
+        this.iframe.id = 'sdkIframe';
+        this.iframe.width = '0%';
+        this.iframe.height = '0%';
+        this.iframe.style.display = 'none';
+
+        document.body.appendChild(this.iframe);
+      }
+
+      closeModal() {
+        if (this.iframe && this.iframe.parentNode) {
+          this.iframe.parentNode.removeChild(this.iframe);
+        }
+      }
+
+      unSubscribeMessage() {
+        window.removeEventListener('message', this.messageHandler);
+      }
+    }
+
     const POPULAR_SERVICES = [
       { name: 'Netflix', cost: 15.99, color: 'hover:border-red-500/40 text-red-400 bg-red-500/5' },
       { name: 'Spotify', cost: 9.99, color: 'hover:border-green-500/40 text-green-400 bg-green-500/5' },
@@ -140,14 +235,17 @@
         validatorAddress: '...'
       });
 
-      // Wallet Connect States
-      const [connectedWallet, setConnectedWallet] = useState(() => localStorage.getItem('submanager_wallet') || '');
+      // Circle Sign In States
+      const [circleUser, setCircleUser] = useState(() => {
+        const stored = localStorage.getItem('submanager_circle_user');
+        return stored ? JSON.parse(stored) : null; // has { email, userToken, walletAddress }
+      });
       const [walletBalance, setWalletBalance] = useState('0.00');
-      const [showConnectModal, setShowConnectModal] = useState(false);
-      const [showCreateModal, setShowCreateModal] = useState(false);
-      const [walletInput, setWalletInput] = useState('');
+      const [showLoginModal, setShowLoginModal] = useState(false);
+      const [loginEmailInput, setLoginEmailInput] = useState('');
+      const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-      // collapsible panel state
+      // Collapsible panel state
       const [isKeysExpanded, setIsKeysExpanded] = useState(true);
       const [ownerKeyInput, setOwnerKeyInput] = useState('');
       const [validatorKeyInput, setValidatorKeyInput] = useState('');
@@ -167,20 +265,20 @@
       const [isTriggeringCheck, setIsTriggeringCheck] = useState(false);
       const [cancellingSubs, setCancellingSubs] = useState({});
 
-      const showNotification = (message, type = 'success') => {
-        setNotif({ message, type });
-        setTimeout(() => setNotif(null), 5000);
+      const showNotification = (message, type = 'success', linkText = '', linkUrl = '') => {
+        setNotif({ message, type, linkText, linkUrl });
+        setTimeout(() => setNotif(null), 8000);
       };
 
-      // Fetch Connected Wallet USDC Balance
+      // Fetch Circle Wallet USDC Balance
       useEffect(() => {
         const fetchBalance = async () => {
-          if (!connectedWallet || !connectedWallet.startsWith('0x')) {
+          if (!circleUser || !circleUser.walletAddress) {
             setWalletBalance('0.00');
             return;
           }
           try {
-            const clean = connectedWallet.toLowerCase().replace('0x', '');
+            const clean = circleUser.walletAddress.toLowerCase().replace('0x', '');
             const callData = '0x70a08231' + clean.padStart(64, '0');
             const res = await fetch(RPC_URL, {
               method: 'POST',
@@ -198,14 +296,14 @@
               setWalletBalance((rawVal / 1000000).toFixed(2));
             }
           } catch (e) {
-            console.error("Failed to fetch wallet USDC balance:", e);
+            console.error("Failed to fetch Circle wallet USDC balance:", e);
           }
         };
 
         fetchBalance();
         const interval = setInterval(fetchBalance, 15000);
         return () => clearInterval(interval);
-      }, [connectedWallet]);
+      }, [circleUser]);
 
       // Helper: Chunked JSON-RPC Logs fetcher to bypass 10,000 block RPC limit
       const fetchLogsChunked = async (address, topics) => {
@@ -288,7 +386,6 @@
             if (Array.isArray(list)) {
               const formatted = list.map(sub => ({
                 ...sub,
-                // Keep amount as number or string to completely avoid BigInt React rendering crash!
                 amount: sub.amount ? String(sub.amount) : '0', 
                 renewalDate: new Date(sub.renewalDate)
               }));
@@ -459,7 +556,6 @@
         const payload = {
           name: service.name,
           cost: service.cost.toString(),
-          // Default renewal is 5 days from now for instant demo trigger
           renewalDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString().substring(0, 10)
         };
 
@@ -529,7 +625,6 @@
           if (res.ok) {
             showNotification(`ERC-8183 Job pipeline kicked off! Check 'On-Chain Job History' in a moment.`);
             loadSubscriptions();
-            // Refresh blockchain logs rapidly for 20s to catch the new job
             let attempts = 0;
             const logPoller = setInterval(() => {
               loadBlockchainLogs();
@@ -565,7 +660,7 @@
         }
       };
 
-      // save keys logic
+      // save manual keys logic
       const saveAgentKeys = async (e) => {
         e.preventDefault();
         if (!ownerKeyInput || !validatorKeyInput) {
@@ -600,6 +695,104 @@
         }
       };
 
+      // Circle Sign In API handlers
+      const handleCircleLogin = async (e) => {
+        e.preventDefault();
+        if (!loginEmailInput || !loginEmailInput.includes('@')) {
+          showNotification('Please enter a valid email address', 'error');
+          return;
+        }
+
+        setIsLoggingIn(true);
+        try {
+          // 1. Initialize Circle Session
+          const res = await fetch(`${API_URL}/auth/init`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userEmail: loginEmailInput })
+          });
+
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || 'Authentication initialization failed');
+          }
+
+          const data = await res.json();
+
+          // 2. Determine challenge vs direct connection
+          if (data.challengeId) {
+            showNotification('◑ Opening secure Circle PIN challenge. Please set your PIN and security answers.');
+            
+            // Execute PIN setup challenge using custom Web3 SDK runner
+            const sdk = new W3SSdk({ configs: { appSettings: { appId: data.appId } } });
+            sdk.setAuthentication({ userToken: data.userToken, encryptionKey: data.encryptionKey });
+            
+            sdk.execute(data.challengeId, async (err, result) => {
+              if (err) {
+                console.error("Circle PIN setup challenge failed:", err);
+                showNotification(`PIN Setup failed: ${err.message || 'Challenge incomplete'}`, 'error');
+                setIsLoggingIn(false);
+                return;
+              }
+
+              // Challenge complete, fetch the newly created wallet address!
+              await fetchWalletAddress(data.userToken, loginEmailInput, true);
+            });
+          } else {
+            // Already initialized, directly fetch wallet address
+            await fetchWalletAddress(data.userToken, loginEmailInput, false);
+          }
+        } catch (e) {
+          showNotification(`Circle Login failed: ${e.message}`, 'error');
+          setIsLoggingIn(false);
+        }
+      };
+
+      // Retrieve wallet from server post-auth/challenge
+      const fetchWalletAddress = async (userToken, email, isNewWallet = false) => {
+        try {
+          const res = await fetch(`${API_URL}/auth/wallet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userToken })
+          });
+
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || 'Failed to fetch wallet address');
+          }
+
+          const wData = await res.json();
+          const sessionUser = {
+            email,
+            userToken,
+            walletAddress: wData.walletAddress,
+            walletId: wData.walletId
+          };
+
+          setCircleUser(sessionUser);
+          localStorage.setItem('submanager_circle_user', JSON.stringify(sessionUser));
+          setShowLoginModal(false);
+          setLoginEmailInput('');
+
+          if (isNewWallet) {
+            showNotification(`🎉 Wallet Created! Address: ${wData.walletAddress}`, 'success', 'Circle Faucet', 'https://faucet.circle.com');
+          } else {
+            showNotification(`Welcome back! Circle Wallet Connected.`);
+          }
+        } catch (e) {
+          showNotification(`Failed to sync Circle wallet: ${e.message}`, 'error');
+        } finally {
+          setIsLoggingIn(false);
+        }
+      };
+
+      const handleSignOut = () => {
+        setCircleUser(null);
+        localStorage.removeItem('submanager_circle_user');
+        showNotification('Circle session signed out.');
+      };
+
       const keysActive = agentConfig.ownerAddress && agentConfig.ownerAddress !== '...' && agentConfig.ownerAddress !== '0x0000000000000000000000000000000000000000';
 
       return (
@@ -607,59 +800,57 @@
           
           {/* Notification Toast */}
           {notif && (
-            <div className={`fixed bottom-6 right-6 z-50 glass-card px-6 py-4 rounded-xl shadow-2xl flex items-center gap-3 border-l-4 ${
+            <div className={`fixed bottom-6 right-6 z-50 glass-card px-6 py-4 rounded-xl shadow-2xl flex flex-col gap-2 border-l-4 ${
               notif.type === 'error' ? 'border-l-red-500 text-red-200' : 'border-l-arc text-slate-200'
             }`}>
               <span className="font-semibold text-sm">{notif.message}</span>
+              {notif.linkUrl && (
+                <a href={notif.linkUrl} target="_blank" className="text-xs text-arc hover:underline font-bold self-start mt-1 flex items-center gap-1">
+                  Go to {notif.linkText} ↗
+                </a>
+              )}
             </div>
           )}
 
-          {/* Top Wallet Connect Banner */}
-          <div className="w-full glass-card rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-center gap-3 border-arc/20">
-            {!connectedWallet ? (
-              <>
-                <div className="flex items-center gap-2">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-gray-500 animate-pulse"></span>
-                  <span className="text-sm text-gray-300 font-medium">Connect your Arc Wallet to use SubManager</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => setShowConnectModal(true)} 
-                    className="bg-arc/10 hover:bg-arc/20 border border-arc/30 text-arc text-xs font-bold px-3 py-1.5 rounded transition-all"
-                  >
-                    Connect Wallet
-                  </button>
-                  <button 
-                    onClick={() => setShowCreateModal(true)}
-                    className="bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-bold px-3 py-1.5 rounded transition-all"
-                  >
-                    Create Wallet
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center gap-2.5">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full bg-green-500 pulse-dot"></span>
-                  <span className="text-xs font-mono font-medium text-gray-300">
-                    Connected: <span className="text-white font-bold">{truncateAddress(connectedWallet)}</span>
-                  </span>
-                  <span className="text-xs bg-arc/10 text-arc border border-arc/20 px-2 py-0.5 rounded font-mono font-semibold">
-                    {walletBalance} USDC
-                  </span>
-                </div>
-                <button 
-                  onClick={() => {
-                    setConnectedWallet('');
-                    localStorage.removeItem('submanager_wallet');
-                    showNotification('Wallet disconnected');
-                  }}
-                  className="text-[11px] text-red-400 hover:text-red-300 font-bold uppercase tracking-wider transition-all"
+          {/* Signed In/Out Header Navigation Bar */}
+          <div className="w-full glass-card rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-center gap-3 border-white/10">
+            <div className="flex items-center gap-3">
+              <span className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                🤖 SubManager
+              </span>
+              <span className="text-[10px] uppercase font-mono tracking-widest text-arc border border-arc/20 px-2 py-0.5 rounded-full bg-arc/5 font-semibold">Web3 Controller</span>
+            </div>
+
+            <div className="flex items-center gap-4">
+              {!circleUser ? (
+                // Signed Out State
+                <button
+                  onClick={() => setShowLoginModal(true)}
+                  className="bg-[#0b1329] hover:bg-[#152347] border border-white/10 text-white text-sm font-semibold px-4 py-2 rounded-lg flex items-center gap-2 transition-all shadow-[0_4px_12px_rgba(0,0,0,0.2)]"
                 >
-                  Disconnect
+                  <span className="text-arc text-base font-bold">◑</span> Sign in with Circle
                 </button>
-              </>
-            )}
+              ) : (
+                // Signed In State
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-2 bg-gray-900/60 border border-gray-800 rounded-lg px-3 py-1.5 text-xs">
+                    <span className="w-2 h-2 bg-green-500 rounded-full pulse-dot"></span>
+                    <span className="font-mono text-gray-300 font-medium">
+                      Circle: <span className="text-white font-bold">{truncateAddress(circleUser.walletAddress)}</span>
+                    </span>
+                    <span className="text-[10px] bg-arc/10 text-arc border border-arc/20 px-2 py-0.5 rounded font-mono font-bold">
+                      {walletBalance} USDC
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleSignOut}
+                    className="text-xs text-red-400 hover:text-red-300 font-bold uppercase tracking-wider transition-all"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Header */}
@@ -670,7 +861,7 @@
                 🤖 SubManager <span className="text-arc text-xs font-bold bg-arc/10 px-3 py-1 rounded-full border border-arc/20 uppercase tracking-widest font-mono">Agent ID: {agentConfig.agentId}</span>
               </h1>
               <p className="text-gray-400 mt-2 font-mono text-xs flex flex-col gap-1">
-                <span>Owner: <span className="text-gray-200">{agentConfig.ownerAddress}</span></span>
+                <span>Owner Wallet: <span className="text-gray-200">{agentConfig.ownerAddress}</span></span>
                 {agentConfig.validatorAddress && <span>Validator: <span className="text-gray-300">{agentConfig.validatorAddress}</span></span>}
               </p>
             </div>
@@ -700,7 +891,7 @@
             {/* Form Column */}
             <div className="lg:col-span-1 space-y-6">
               
-              {/* Collapsible Your Agent Keys Setup Panel */}
+              {/* Sleek Collapsible Agent Keys Setup Panel with Circle Auto-populate support */}
               <div className="glass-card rounded-2xl p-6 relative">
                 <div className="flex justify-between items-center mb-4 cursor-pointer" onClick={() => setIsKeysExpanded(!isKeysExpanded)}>
                   <h3 className="text-md font-bold text-white flex items-center gap-2">
@@ -718,35 +909,61 @@
 
                 {isKeysExpanded && (
                   <div className="space-y-4 pt-3 border-t border-white/5">
-                    <form onSubmit={saveAgentKeys} className="space-y-3">
-                      <div>
-                        <label className="text-xs uppercase text-gray-400 font-semibold tracking-wider block mb-1">Owner Private Key</label>
-                        <input 
-                          type="password" 
-                          placeholder="0x..." 
-                          value={ownerKeyInput}
-                          onChange={e => setOwnerKeyInput(e.target.value)}
-                          className="w-full glass-input rounded-lg px-3 py-2 text-xs font-mono"
-                        />
+                    
+                    {/* Circle Wallet Connected Note */}
+                    {circleUser && (
+                      <div className="bg-arc/5 border border-arc/20 rounded-xl p-3.5 space-y-2">
+                        <span className="text-[10px] bg-arc/20 text-arc px-2.5 py-0.5 rounded-full uppercase tracking-wider font-bold font-mono inline-block">
+                          🔗 Circle Wallet Connected
+                        </span>
+                        <p className="text-[11px] text-gray-300 leading-relaxed font-mono">
+                          Your Circle wallet is connected. Export your private key from Circle Console to activate the agent.
+                        </p>
+                        <a 
+                          href="https://console.circle.com" 
+                          target="_blank" 
+                          className="text-xs text-arc hover:underline font-extrabold flex items-center gap-1 mt-1"
+                        >
+                          Circle Console ↗
+                        </a>
                       </div>
-                      <div>
-                        <label className="text-xs uppercase text-gray-400 font-semibold tracking-wider block mb-1">Validator Private Key</label>
-                        <input 
-                          type="password" 
-                          placeholder="0x..." 
-                          value={validatorKeyInput}
-                          onChange={e => setValidatorKeyInput(e.target.value)}
-                          className="w-full glass-input rounded-lg px-3 py-2 text-xs font-mono"
-                        />
-                      </div>
-                      <button 
-                        type="submit" 
-                        disabled={isSavingKeys}
-                        className="w-full bg-arc hover:bg-arcDark disabled:opacity-50 text-slate-950 font-extrabold py-2 rounded-lg text-xs transition-all shadow-[0_0_10px_rgba(0,209,255,0.15)]"
-                      >
-                        {isSavingKeys ? 'Activating...' : 'Save & Activate'}
-                      </button>
-                    </form>
+                    )}
+
+                    {/* Standard/Advanced private key form */}
+                    <div className="space-y-3">
+                      <span className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
+                        {circleUser ? 'Advanced: Use existing wallet keys' : 'Configure Agent Private Keys'}
+                      </span>
+                      <form onSubmit={saveAgentKeys} className="space-y-3">
+                        <div>
+                          <label className="text-[10px] uppercase text-gray-400 font-semibold tracking-wider block mb-1">Owner Private Key</label>
+                          <input 
+                            type="password" 
+                            placeholder={circleUser ? "Your Circle wallet is connected. Paste exported key..." : "0x..."} 
+                            value={ownerKeyInput}
+                            onChange={e => setOwnerKeyInput(e.target.value)}
+                            className="w-full glass-input rounded-lg px-3 py-2 text-xs font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] uppercase text-gray-400 font-semibold tracking-wider block mb-1">Validator Private Key</label>
+                          <input 
+                            type="password" 
+                            placeholder="0x..." 
+                            value={validatorKeyInput}
+                            onChange={e => setValidatorKeyInput(e.target.value)}
+                            className="w-full glass-input rounded-lg px-3 py-2 text-xs font-mono"
+                          />
+                        </div>
+                        <button 
+                          type="submit" 
+                          disabled={isSavingKeys}
+                          className="w-full bg-arc hover:bg-arcDark disabled:opacity-50 text-slate-950 font-extrabold py-2 rounded-lg text-xs transition-all shadow-[0_0_10px_rgba(0,209,255,0.15)]"
+                        >
+                          {isSavingKeys ? 'Activating...' : 'Save & Activate'}
+                        </button>
+                      </form>
+                    </div>
 
                     {keysActive && (
                       <div className="bg-gray-900/60 rounded-lg p-3 border border-gray-800 text-[10px] font-mono space-y-1 text-gray-400">
@@ -1026,7 +1243,7 @@
                 <div className="flex items-center gap-4">
                   <div className="w-14 h-14 rounded-xl bg-arc/10 flex items-center justify-center border border-arc/20 shadow-[0_0_15px_rgba(0,209,255,0.1)]">
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7 text-arc" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
                     </svg>
                   </div>
                   <div>
@@ -1060,89 +1277,55 @@
             </div>
           </div>
 
-          {/* Connect Wallet Modal */}
-          {showConnectModal && (
+          {/* Circle Sign-in Email Input Modal */}
+          {showLoginModal && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-fade-in">
-              <div className="glass-card rounded-2xl p-6 max-w-md w-full space-y-4">
+              <div className="glass-card rounded-2xl p-6 max-w-sm w-full space-y-4">
                 <div className="flex justify-between items-center">
-                  <h3 className="text-lg font-bold text-white">🔗 Connect Arc Wallet</h3>
-                  <button onClick={() => setShowConnectModal(false)} className="text-gray-400 hover:text-white font-bold text-xl font-mono">×</button>
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <span className="text-arc text-base font-bold">◑</span> Sign in with Circle
+                  </h3>
+                  <button onClick={() => setShowLoginModal(false)} className="text-gray-400 hover:text-white font-bold text-xl font-mono">×</button>
                 </div>
-                <p className="text-xs text-gray-400 leading-relaxed">
-                  Paste your public Arc wallet address below. This establishes a <strong>read-only connection</strong> to view your balance on-chain. Private keys are never requested here.
-                </p>
-                <div>
-                  <label className="text-xs uppercase text-gray-400 font-bold block mb-1">Public Address</label>
-                  <input 
-                    type="text" 
-                    placeholder="0x..." 
-                    value={walletInput}
-                    onChange={e => setWalletInput(e.target.value)}
-                    className="w-full glass-input rounded-lg px-3 py-2 text-sm font-mono"
-                  />
-                </div>
-                <div className="flex gap-2 justify-end pt-2">
-                  <button 
-                    onClick={() => setShowConnectModal(false)}
-                    className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-2 rounded font-bold"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={() => {
-                      if (walletInput.startsWith('0x') && walletInput.length === 42) {
-                        setConnectedWallet(walletInput);
-                        localStorage.setItem('submanager_wallet', walletInput);
-                        setShowConnectModal(false);
-                        setWalletInput('');
-                        showNotification('Arc Wallet connected!');
-                      } else {
-                        showNotification('Please enter a valid 0x-prefixed 40-character address', 'error');
-                      }
-                    }}
-                    className="text-xs bg-arc hover:bg-arcDark text-slate-950 px-4 py-2 rounded font-extrabold"
-                  >
-                    Connect
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Create Wallet Modal */}
-          {showCreateModal && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-fade-in">
-              <div className="glass-card rounded-2xl p-6 max-w-md w-full space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-lg font-bold text-white">🔑 Generate Your Arc Wallet</h3>
-                  <button onClick={() => setShowCreateModal(false)} className="text-gray-400 hover:text-white font-bold text-xl font-mono">×</button>
-                </div>
-                <p className="text-xs text-gray-400 leading-relaxed">
-                  To create a new cryptographic wallet on Arc Testnet, generate your private/public keypair on your machine using Node.js:
-                </p>
-                <div className="bg-gray-900/80 p-3 rounded-lg border border-gray-800">
-                  <pre className="text-[10px] font-mono text-arc overflow-x-auto whitespace-pre-wrap leading-relaxed">node --input-type=module -e "import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'; const k = generatePrivateKey(); console.log('Private Key:', k, '\nAddress:', privateKeyToAccount(k).address);"</pre>
-                </div>
-                <p className="text-xs text-gray-400 leading-relaxed">
-                  You can also run a generated script by calling:
-                  <br />
-                  <code className="text-arc font-mono bg-black/40 px-1 py-0.5 rounded">node --input-type=module script</code>
-                </p>
-                <p className="text-xs text-gray-400 leading-relaxed">
-                  Once generated, make sure to:
-                  <br />
-                  1. Securely save your private keys.
-                  <br />
-                  2. Navigate to the <strong><a href="https://faucet.circle.com" target="_blank" className="text-arc hover:underline font-bold">Circle USDC Faucet</a></strong>, select Arc Testnet, and fund your public address.
-                </p>
-                <div className="flex justify-end pt-2">
-                  <button 
-                    onClick={() => setShowCreateModal(false)}
-                    className="text-xs bg-arc hover:bg-arcDark text-slate-950 px-5 py-2 rounded font-extrabold"
-                  >
-                    Got It
-                  </button>
-                </div>
+                <form onSubmit={handleCircleLogin} className="space-y-4">
+                  <p className="text-xs text-gray-400 leading-relaxed">
+                    Circle's Programmable Wallets Web SDK will secure your account. Enter your email to authenticate or create a new user-controlled MPC wallet.
+                  </p>
+                  <div>
+                    <label className="text-[10px] uppercase text-gray-400 font-bold block mb-1">Email Address</label>
+                    <input 
+                      type="email" 
+                      placeholder="you@example.com" 
+                      value={loginEmailInput}
+                      onChange={e => setLoginEmailInput(e.target.value)}
+                      required
+                      disabled={isLoggingIn}
+                      className="w-full glass-input rounded-lg px-3 py-2 text-sm font-medium"
+                    />
+                  </div>
+                  <div className="flex gap-2 justify-end pt-2">
+                    <button 
+                      type="button"
+                      onClick={() => setShowLoginModal(false)}
+                      disabled={isLoggingIn}
+                      className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-2 rounded font-bold transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit"
+                      disabled={isLoggingIn}
+                      className="text-xs bg-arc hover:bg-arcDark disabled:opacity-50 text-slate-950 px-4 py-2 rounded font-extrabold flex items-center gap-1.5 transition-all shadow-[0_0_10px_rgba(0,209,255,0.2)]"
+                    >
+                      {isLoggingIn ? (
+                        <>
+                          <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full"></span>
+                          Signing In...
+                        </>
+                      ) : 'Continue'}
+                    </button>
+                  </div>
+                </form>
               </div>
             </div>
           )}
