@@ -3,10 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Agent Dashboard</title>
+  <title>Agent Escrow Subscription Manager</title>
   
   <!-- Tailwind CSS v3 -->
   <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Google Fonts: Outfit -->
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
   
   <!-- React & ReactDOM -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -16,13 +19,47 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <style>
-    body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; }
-    .glass-card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+    body { 
+      font-family: 'Outfit', sans-serif; 
+      background-color: #0b0f19; 
+      color: #f8fafc; 
+    }
+    .glass-card { 
+      background: rgba(17, 24, 39, 0.7); 
+      backdrop-filter: blur(12px); 
+      border: 1px solid rgba(255, 255, 255, 0.08); 
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    }
+    .glass-input {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #f8fafc;
+      transition: all 0.3s ease;
+    }
+    .glass-input:focus {
+      border-color: #00D1FF;
+      outline: none;
+      box-shadow: 0 0 10px rgba(0, 209, 255, 0.25);
+    }
     .pulse-dot { animation: pulse 2s infinite; }
     @keyframes pulse {
       0% { box-shadow: 0 0 0 0 rgba(0, 209, 255, 0.4); }
-      70% { box-shadow: 0 0 0 6px rgba(0, 209, 255, 0); }
+      70% { box-shadow: 0 0 0 8px rgba(0, 209, 255, 0); }
       100% { box-shadow: 0 0 0 0 rgba(0, 209, 255, 0); }
+    }
+    .scrollbar-thin::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .scrollbar-thin::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      background: rgba(0, 209, 255, 0.2);
+      border-radius: 3px;
+    }
+    .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+      background: rgba(0, 209, 255, 0.4);
     }
   </style>
 
@@ -30,47 +67,73 @@
     tailwind.config = {
       theme: {
         extend: {
-          colors: { arc: '#00D1FF' }
+          colors: { 
+            arc: '#00D1FF',
+            arcDark: '#0083A0',
+            panelBg: '#111827'
+          },
+          fontFamily: {
+            mono: ['JetBrains Mono', 'monospace']
+          }
         }
       }
     }
   </script>
 </head>
-<body class="antialiased min-h-screen flex flex-col items-center py-10 px-4">
+<body class="antialiased min-h-screen flex flex-col items-center py-8 px-4">
   <div id="root" class="w-full max-w-5xl"></div>
   
   <script type="text/babel">
     const { useState, useEffect } = React;
 
-    // Configuration
+    // Static Addresses
     const AGENTIC_COMMERCE_ADDRESS = '0x0747EEf0706327138c69792bF28Cd525089e4583';
     const REPUTATION_REGISTRY_ADDRESS = '0x8004B663056A597Dffe9eCcC1965A193B7388713';
     const RPC_URL = 'https://rpc.testnet.arc.network';
-    const AGENT_ID = '1';
-    const OWNER_ADDRESS = '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0';
+    const API_URL = 'http://localhost:3001';
 
-    // Mock Data
-    const MOCK_SUBSCRIPTIONS = [
-      { id: 'sub-1', name: 'Netflix', cost: 15.99, renewalDate: new Date(Date.now() + 2 * 86400000) },
-      { id: 'sub-2', name: 'ChatGPT', cost: 20.00, renewalDate: new Date(Date.now() + 5 * 86400000) },
-      { id: 'sub-3', name: 'Spotify', cost: 9.99, renewalDate: new Date(Date.now() + 10 * 86400000) },
+    const POPULAR_SERVICES = [
+      { name: 'Netflix', cost: 15.99, color: 'hover:border-red-500/40 text-red-400 bg-red-500/5' },
+      { name: 'Spotify', cost: 9.99, color: 'hover:border-green-500/40 text-green-400 bg-green-500/5' },
+      { name: 'ChatGPT Plus', cost: 20.00, color: 'hover:border-emerald-500/40 text-emerald-400 bg-emerald-500/5' },
+      { name: 'Amazon Prime', cost: 14.99, color: 'hover:border-amber-500/40 text-amber-400 bg-amber-500/5' },
+      { name: 'YouTube Premium', cost: 13.99, color: 'hover:border-red-600/40 text-red-500 bg-red-600/5' },
+      { name: 'Apple TV+', cost: 9.99, color: 'hover:border-slate-300/40 text-slate-300 bg-slate-300/5' },
+      { name: 'Disney+', cost: 10.99, color: 'hover:border-blue-400/40 text-blue-400 bg-blue-400/5' },
+      { name: 'Notion', cost: 16.00, color: 'hover:border-stone-400/40 text-stone-300 bg-stone-400/5' },
+      { name: 'GitHub Pro', cost: 4.00, color: 'hover:border-purple-400/40 text-purple-400 bg-purple-400/5' },
+      { name: 'Figma', cost: 15.00, color: 'hover:border-pink-500/40 text-pink-400 bg-pink-500/5' },
     ];
 
-    // Helper: Hex to readable ASCII string (ignores null padding)
-    const hexToString = (hex) => {
-      let str = '';
-      for (let i = 0; i < hex.length; i += 2) {
-        const code = parseInt(hex.substring(i, i + 2), 16);
-        if (code > 31 && code < 127) str += String.fromCharCode(code);
-      }
-      return str.trim();
-    };
-
-    const truncateAddress = (addr) => `${addr.substring(0, 6)}...${addr.substring(addr.length - 4)}`;
+    const truncateAddress = (addr) => addr ? `${addr.substring(0, 6)}...${addr.substring(addr.length - 4)}` : '';
 
     function App() {
+      // Configuration state resolved dynamically from API
+      const [agentConfig, setAgentConfig] = useState({ 
+        agentId: '1', 
+        ownerAddress: '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0',
+        validatorAddress: ''
+      });
+
+      // UI Subscriptions List
+      const [subscriptions, setSubscriptions] = useState([]);
       const [jobs, setJobs] = useState(null);
       const [reputation, setReputation] = useState(null);
+      const [notif, setNotif] = useState(null);
+
+      // Forms
+      const [newSub, setNewSub] = useState({ name: '', cost: '', renewalDate: '' });
+      const [editingId, setEditingId] = useState(null);
+      const [editForm, setEditForm] = useState({ name: '', cost: '', renewalDate: '' });
+      
+      // Loading indicators
+      const [isTriggeringCheck, setIsTriggeringCheck] = useState(false);
+      const [cancellingSubs, setCancellingSubs] = useState({});
+
+      const showNotification = (message, type = 'success') => {
+        setNotif({ message, type });
+        setTimeout(() => setNotif(null), 5000);
+      };
 
       // Helper: Chunked JSON-RPC Logs fetcher to bypass 10,000 block RPC limit
       const fetchLogsChunked = async (address, topics) => {
@@ -87,8 +150,8 @@
           const allLogs = [];
           const reqs = [];
 
-          // Scan the last 1,000,000 blocks to guarantee catching all recent agent history
-          let startBlock = latestBlock - 1000000;
+          // Scan last 100,000 blocks for quick sync on load
+          let startBlock = latestBlock - 100000;
           if (startBlock < 0) startBlock = 0;
 
           for (let from = startBlock; from <= latestBlock; from += CHUNK_SIZE + 1) {
@@ -97,26 +160,23 @@
             reqs.push({ fromHex: '0x' + from.toString(16), toHex: '0x' + to.toString(16) });
           }
 
-          // Execute in parallel batches of 25 for fast speed
-          for (let i = 0; i < reqs.length; i += 25) {
-            const batch = reqs.slice(i, i + 25);
-            const results = await Promise.all(batch.map(req => 
-              fetch(RPC_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  jsonrpc: '2.0',
-                  method: 'eth_getLogs',
-                  params: [{ address, topics, fromBlock: req.fromHex, toBlock: req.toHex }],
-                  id: 1
-                })
-              }).then(r => r.json())
-            ));
-            
-            for (const data of results) {
-              if (data.result && Array.isArray(data.result)) {
-                allLogs.push(...data.result);
-              }
+          // Execute in parallel
+          const results = await Promise.all(reqs.map(req => 
+            fetch(RPC_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'eth_getLogs',
+                params: [{ address, topics, fromBlock: req.fromHex, toBlock: req.toHex }],
+                id: 1
+              })
+            }).then(r => r.json())
+          ));
+          
+          for (const data of results) {
+            if (data.result && Array.isArray(data.result)) {
+              allLogs.push(...data.result);
             }
           }
           return allLogs;
@@ -126,9 +186,40 @@
         }
       };
 
-      const loadData = async () => {
+      // Load agent configs
+      const loadAgentConfig = async () => {
         try {
-          // Original correct topics for Arc Testnet
+          const res = await fetch(`${API_URL}/agent`);
+          if (res.ok) {
+            const data = await res.json();
+            setAgentConfig(data);
+          }
+        } catch (e) {
+          console.warn("Express API unreachable. Using static client fallback configuration.");
+        }
+      };
+
+      // Load all subscriptions
+      const loadSubscriptions = async () => {
+        try {
+          const res = await fetch(`${API_URL}/subscriptions`);
+          if (res.ok) {
+            const list = await res.json();
+            const formatted = list.map(sub => ({
+              ...sub,
+              amount: BigInt(sub.amount),
+              renewalDate: new Date(sub.renewalDate)
+            }));
+            setSubscriptions(formatted);
+          }
+        } catch (e) {
+          console.error("Failed to load subscriptions from backend:", e);
+        }
+      };
+
+      // On-Chain historical logs query
+      const loadBlockchainLogs = async () => {
+        try {
           const TOPIC_JOB_CREATED = '0xb0f0239bfdd96453e24733e18bfc24b70d8fadf123dd977473518dd577ee79b9';
           const TOPIC_JOB_COMPLETED = '0x869e2577b006bf47ee981cf6fec2e25583548081c14b98deab587f77b5068038';
           const TOPIC_FEEDBACK_GIVEN = '0x6a4a61743519c9d648a14e6493f47dbe3ff1aa29e7785c96c8326a205e58febc';
@@ -146,13 +237,19 @@
             let reason = '-';
             if (completedLog) {
               status = 'Completed';
-              // Decode reason from non-indexed data
-              reason = hexToString(completedLog.data.substring(2));
+              
+              // Correctly map bytes32 keccak256 hash or truncate
+              const rawReason = completedLog.data.toLowerCase();
+              if (rawReason.includes('d8bf7293833406352eec85307307ebdbf48a434a87204e7a67d1750cf11a2145')) {
+                reason = 'Cancellation Verified';
+              } else {
+                reason = rawReason.length > 10 ? rawReason.substring(0, 10) + '...' : rawReason;
+              }
             }
 
             return {
               jobId,
-              txHash: log.transactionHash, // Restored the real TX hashes!
+              txHash: log.transactionHash,
               status,
               reason
             };
@@ -160,183 +257,540 @@
           
           setJobs(parsedJobs);
 
-          // 2. Fetch Reputation
-          const agentIdHex = '0x' + parseInt(AGENT_ID).toString(16).padStart(64, '0');
+          // 2. Fetch Reputation score
+          const agentIdHex = '0x' + parseInt(agentConfig.agentId).toString(16).padStart(64, '0');
           const feedbackLogs = await fetchLogsChunked(REPUTATION_REGISTRY_ADDRESS, [TOPIC_FEEDBACK_GIVEN, agentIdHex]);
           
           if (feedbackLogs.length > 0) {
             const latest = feedbackLogs[feedbackLogs.length - 1];
             const resData = latest.data.substring(2);
-            // score is index 1 (bytes 32-64, hex 64-128)
             const score = parseInt(resData.substring(64, 128), 16);
             
-            // tag is string at index 6 (offset at bytes 192-224, hex 384-448)
             const tagOffsetBytes = parseInt(resData.substring(384, 448), 16);
             const tagOffset = tagOffsetBytes * 2;
             const tagLenBytes = parseInt(resData.substring(tagOffset, tagOffset + 64), 16);
             const tagHex = resData.substring(tagOffset + 64, tagOffset + 64 + tagLenBytes * 2);
-            const tag = hexToString(tagHex);
             
-            setReputation({ score, tag });
+            let tag = '';
+            for (let i = 0; i < tagHex.length; i += 2) {
+              const code = parseInt(tagHex.substring(i, i + 2), 16);
+              if (code > 31 && code < 127) tag += String.fromCharCode(code);
+            }
+            
+            setReputation({ score, tag: tag.trim() });
           } else {
             setReputation({ score: 0, tag: 'No feedback yet' });
           }
         } catch (e) {
-          console.error("Error fetching on-chain data:", e);
+          console.error("Error fetching on-chain logs:", e);
         }
       };
 
+      const refreshAll = async () => {
+        await loadSubscriptions();
+        await loadBlockchainLogs();
+      };
+
       useEffect(() => {
-        loadData();
-        const interval = setInterval(loadData, 30000);
-        return () => clearInterval(interval);
+        const init = async () => {
+          await loadAgentConfig();
+        };
+        init();
       }, []);
 
+      useEffect(() => {
+        refreshAll();
+        const interval = setInterval(refreshAll, 30000);
+        return () => clearInterval(interval);
+      }, [agentConfig]);
+
+      // Form triggers
+      const registerSubscription = async (e) => {
+        e.preventDefault();
+        if (!newSub.name || !newSub.cost || !newSub.renewalDate) {
+          showNotification('Please fill in all subscription fields', 'error');
+          return;
+        }
+
+        try {
+          const res = await fetch(`${API_URL}/subscriptions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newSub)
+          });
+          if (res.ok) {
+            showNotification(`Registered subscription for '${newSub.name}'!`);
+            setNewSub({ name: '', cost: '', renewalDate: '' });
+            loadSubscriptions();
+          } else {
+            const data = await res.json();
+            showNotification(data.error || 'Registration failed', 'error');
+          }
+        } catch (error) {
+          showNotification('Cannot connect to Express backend API', 'error');
+        }
+      };
+
+      const registerPresetService = async (service) => {
+        const payload = {
+          name: service.name,
+          amount: service.cost.toString(),
+          // Default renewal is 5 days from now for instant demo trigger
+          renewalDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString().substring(0, 10)
+        };
+
+        try {
+          const res = await fetch(`${API_URL}/subscriptions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (res.ok) {
+            showNotification(`Added ${service.name} preset instantly!`);
+            loadSubscriptions();
+          } else {
+            const data = await res.json();
+            showNotification(data.error || 'Preset failed', 'error');
+          }
+        } catch (error) {
+          showNotification('API Offline', 'error');
+        }
+      };
+
+      const startEditing = (sub) => {
+        setEditingId(sub.id);
+        setEditForm({
+          name: sub.name,
+          cost: (Number(sub.amount) / 1000000).toString(),
+          renewalDate: sub.renewalDate.toISOString().substring(0, 10)
+        });
+      };
+
+      const saveEdit = async (id, originalName) => {
+        try {
+          const res = await fetch(`${API_URL}/subscriptions/${originalName}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: editForm.name,
+              amount: editForm.cost,
+              renewalDate: editForm.renewalDate
+            })
+          });
+          if (res.ok) {
+            showNotification('Subscription updated successfully!');
+            setEditingId(null);
+            loadSubscriptions();
+          } else {
+            const data = await res.json();
+            showNotification(data.error || 'Edit failed', 'error');
+          }
+        } catch (e) {
+          showNotification('Failed to update subscription', 'error');
+        }
+      };
+
+      const cancelSubTrigger = async (subName) => {
+        setCancellingSubs(prev => ({ ...prev, [subName]: true }));
+        try {
+          showNotification(`Escrow cancel requested for '${subName}'. Sending to Arc Testnet...`);
+          const res = await fetch(`${API_URL}/subscriptions/${subName}/cancel`, {
+            method: 'POST'
+          });
+          if (res.ok) {
+            showNotification(`ERC-8183 Job pipeline kicked off! Check 'On-Chain Job History' in a moment.`);
+            loadSubscriptions();
+            // Refresh blockchain logs rapidly for 20s to catch the new job
+            let attempts = 0;
+            const logPoller = setInterval(() => {
+              loadBlockchainLogs();
+              attempts++;
+              if (attempts > 5) clearInterval(logPoller);
+            }, 4000);
+          } else {
+            const data = await res.json();
+            showNotification(data.error || 'Cancellation request failed', 'error');
+          }
+        } catch (e) {
+          showNotification('Failed to trigger cancellation job', 'error');
+        } finally {
+          setCancellingSubs(prev => ({ ...prev, [subName]: false }));
+        }
+      };
+
+      const triggerRenewalCheck = async () => {
+        setIsTriggeringCheck(true);
+        showNotification('Running manual renewal check loop...');
+        try {
+          const res = await fetch(`${API_URL}/trigger`, { method: 'POST' });
+          if (res.ok) {
+            showNotification('Renewal check finished. Escrow pipeline will be run for urgent renewals.');
+            refreshAll();
+          } else {
+            showNotification('Manual check failed', 'error');
+          }
+        } catch (e) {
+          showNotification('API Offline', 'error');
+        } finally {
+          setIsTriggeringCheck(false);
+        }
+      };
+
       return (
-        <div className="space-y-8 animate-fade-in">
+        <div className="space-y-8 pb-12 animate-fade-in">
           
-          {/* Header */}
-          <header className="glass-card rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between shadow-2xl">
-            <div>
-              <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
-                Subscription Manager <span className="text-arc text-lg bg-arc/10 px-3 py-1 rounded-full border border-arc/20">Agent ID: {AGENT_ID}</span>
-              </h1>
-              <p className="text-gray-400 mt-2 font-mono text-sm">Owner: {truncateAddress(OWNER_ADDRESS)}</p>
+          {/* Notification Toast */}
+          {notif && (
+            <div className={`fixed bottom-6 right-6 z-50 glass-card px-6 py-4 rounded-xl shadow-2xl flex items-center gap-3 border-l-4 ${
+              notif.type === 'error' ? 'border-l-red-500 text-red-200' : 'border-l-arc text-slate-200'
+            }`}>
+              <span className="font-semibold text-sm">{notif.message}</span>
             </div>
-            <div className="mt-4 md:mt-0 flex items-center gap-3 bg-gray-800/80 px-4 py-2 rounded-full border border-gray-700">
-              <div className="w-3 h-3 rounded-full bg-arc pulse-dot"></div>
-              <span className="text-sm font-semibold text-gray-200">Live on Arc Testnet</span>
+          )}
+
+          {/* Header */}
+          <header className="glass-card rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between shadow-2xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-arc/5 rounded-full blur-3xl pointer-events-none"></div>
+            <div>
+              <h1 className="text-3xl font-extrabold tracking-tight text-white flex flex-wrap items-center gap-3">
+                🤖 Escrow Manager <span className="text-arc text-xs font-bold bg-arc/10 px-3 py-1 rounded-full border border-arc/20 uppercase tracking-widest font-mono">Agent ID: {agentConfig.agentId}</span>
+              </h1>
+              <p className="text-gray-400 mt-2 font-mono text-xs flex flex-col gap-1">
+                <span>Owner: <span className="text-gray-200">{agentConfig.ownerAddress}</span></span>
+                {agentConfig.validatorAddress && <span>Validator: <span className="text-gray-300">{agentConfig.validatorAddress}</span></span>}
+              </p>
+            </div>
+            
+            <div className="mt-4 md:mt-0 flex flex-wrap items-center gap-4">
+              <button 
+                onClick={triggerRenewalCheck}
+                disabled={isTriggeringCheck}
+                className="bg-arc hover:bg-arcDark disabled:opacity-50 text-slate-950 font-bold px-4 py-2 rounded-lg text-sm transition-all duration-200 flex items-center gap-2 shadow-[0_0_15px_rgba(0,209,255,0.3)] hover:shadow-[0_0_20px_rgba(0,209,255,0.5)]"
+              >
+                {isTriggeringCheck ? (
+                  <span className="animate-spin inline-block w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full"></span>
+                ) : '⚡'}
+                Trigger Cron Check
+              </button>
+              
+              <div className="flex items-center gap-3 bg-gray-900/80 px-4 py-2 rounded-lg border border-gray-800">
+                <div className="w-2.5 h-2.5 rounded-full bg-arc pulse-dot"></div>
+                <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider font-mono">Arc Testnet</span>
+              </div>
             </div>
           </header>
 
+          {/* Quick presets & forms grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             
-            {/* Main Content (Subscriptions & Jobs) */}
-            <div className="lg:col-span-2 space-y-8">
+            {/* Form Column */}
+            <div className="lg:col-span-1 space-y-6">
               
-              {/* Subscriptions Grid */}
-              <section>
-                <h2 className="text-xl font-semibold mb-4 text-gray-300">Monitored Subscriptions</h2>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {MOCK_SUBSCRIPTIONS.map(sub => {
-                    const daysLeft = Math.ceil((sub.renewalDate - new Date()) / 86400000);
-                    const isUrgent = daysLeft <= 7;
-                    return (
-                      <div key={sub.id} className="glass-card rounded-xl p-5 relative overflow-hidden group hover:border-arc/50 transition-colors">
-                        <div className="flex justify-between items-start mb-2">
-                          <h3 className="text-xl font-bold">{sub.name}</h3>
-                          <span className="text-lg font-medium text-green-400">${sub.cost.toFixed(2)}</span>
-                        </div>
-                        <p className="text-gray-400 text-sm mb-4">Renews: {sub.renewalDate.toLocaleDateString()}</p>
-                        
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Status</span>
-                          {isUrgent ? (
-                            <span className="bg-red-500/20 text-red-400 border border-red-500/30 px-2 py-1 rounded-md text-xs font-bold shadow-[0_0_10px_rgba(239,68,68,0.2)]">
-                              {daysLeft} Days Left
-                            </span>
-                          ) : (
-                            <span className="bg-blue-500/20 text-blue-400 border border-blue-500/30 px-2 py-1 rounded-md text-xs font-bold">
-                              {daysLeft} Days Left
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
+              {/* Custom register form */}
+              <div className="glass-card rounded-2xl p-6 relative">
+                <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                  <span className="text-arc">➕</span> Register Subscription
+                </h3>
+                <form onSubmit={registerSubscription} className="space-y-4">
+                  <div>
+                    <label className="text-xs uppercase text-gray-400 font-semibold tracking-wider block mb-1">Service Name</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Netflix" 
+                      value={newSub.name}
+                      onChange={e => setNewSub({...newSub, name: e.target.value})}
+                      className="w-full glass-input rounded-lg px-3 py-2 text-sm font-medium"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs uppercase text-gray-400 font-semibold tracking-wider block mb-1">Cost (USDC)</label>
+                      <input 
+                        type="number" 
+                        step="0.01" 
+                        placeholder="15.99" 
+                        value={newSub.cost}
+                        onChange={e => setNewSub({...newSub, cost: e.target.value})}
+                        className="w-full glass-input rounded-lg px-3 py-2 text-sm font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs uppercase text-gray-400 font-semibold tracking-wider block mb-1">Renewal Date</label>
+                      <input 
+                        type="date" 
+                        value={newSub.renewalDate}
+                        onChange={e => setNewSub({...newSub, renewalDate: e.target.value})}
+                        className="w-full glass-input rounded-lg px-3 py-2 text-sm font-medium"
+                      />
+                    </div>
+                  </div>
+                  <button 
+                    type="submit" 
+                    className="w-full bg-gradient-to-r from-arc to-blue-500 hover:from-arcDark hover:to-blue-600 text-slate-950 font-extrabold py-2.5 rounded-lg text-sm transition-all shadow-lg shadow-arc/10 hover:shadow-arc/20"
+                  >
+                    Add Active Contract
+                  </button>
+                </form>
+              </div>
 
-              {/* Job History */}
+              {/* Quick Add Presets */}
+              <div className="glass-card rounded-2xl p-6">
+                <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2">
+                  <span className="text-arc">⚡</span> Quick Preset Services
+                </h3>
+                <p className="text-xs text-gray-400 mb-4">Click to instantly populate and monitor a pre-configured service contract.</p>
+                
+                <div className="grid grid-cols-2 gap-2 max-h-[300px] overflow-y-auto scrollbar-thin pr-1">
+                  {POPULAR_SERVICES.map((service, index) => (
+                    <button
+                      key={index}
+                      onClick={() => registerPresetService(service)}
+                      className={`flex flex-col items-start p-2.5 rounded-lg border border-white/5 transition-all text-left ${service.color}`}
+                    >
+                      <span className="font-bold text-xs text-white truncate w-full">{service.name}</span>
+                      <span className="text-[10px] opacity-80 mt-0.5">${service.cost}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+
+            {/* Dashboard Subscriptions cards grid */}
+            <div className="lg:col-span-2 space-y-6">
+              
               <section>
                 <div className="flex justify-between items-center mb-4">
-                  <h2 className="text-xl font-semibold text-gray-300">On-Chain Job History</h2>
-                  {jobs && <span className="text-xs text-gray-500">Auto-refreshes every 30s</span>}
+                  <h2 className="text-lg font-bold uppercase tracking-wider text-gray-300 flex items-center gap-2">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-arc"></span>
+                    Monitored Services ({subscriptions.length})
+                  </h2>
+                  <button onClick={loadSubscriptions} className="text-xs text-arc hover:underline">🔄 Reload</button>
                 </div>
-                <div className="glass-card rounded-xl overflow-hidden">
-                  <table className="w-full text-left text-sm text-gray-400">
-                    <thead className="text-xs uppercase bg-gray-800/50 text-gray-400 border-b border-gray-700">
-                      <tr>
-                        <th className="px-6 py-4">Job ID</th>
-                        <th className="px-6 py-4">Transaction</th>
-                        <th className="px-6 py-4">Status</th>
-                        <th className="px-6 py-4">Reason</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {!jobs ? (
-                        <tr>
-                          <td colSpan="4" className="px-6 py-8 text-center">
-                            <div className="animate-pulse flex flex-col items-center space-y-2">
-                              <div className="h-4 bg-gray-700 rounded w-1/4"></div>
-                              <div className="text-xs text-gray-500">Syncing with Arc Testnet...</div>
+                
+                {subscriptions.length === 0 ? (
+                  <div className="glass-card rounded-2xl p-10 text-center text-gray-400 border-dashed border-2 border-white/10">
+                    No subscriptions registered. Add a preset or register a custom service above!
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {subscriptions.map(sub => {
+                      const daysLeft = Math.ceil((sub.renewalDate - new Date()) / 86400000);
+                      const isUrgent = daysLeft <= 7;
+                      const isEditing = editingId === sub.id;
+                      const isCancelling = !!cancellingSubs[sub.name];
+
+                      return (
+                        <div key={sub.id} className={`glass-card rounded-xl p-5 relative overflow-hidden group hover:border-arc/30 transition-all ${
+                          !sub.active ? 'opacity-40 grayscale' : ''
+                        }`}>
+                          
+                          {isEditing ? (
+                            // Inline Edit Mode
+                            <div className="space-y-3">
+                              <h4 className="text-xs font-bold text-arc uppercase tracking-wider">Edit Subscription</h4>
+                              <input 
+                                type="text" 
+                                value={editForm.name} 
+                                onChange={e => setEditForm({...editForm, name: e.target.value})}
+                                className="w-full glass-input rounded px-2 py-1 text-xs" 
+                                placeholder="Service Name"
+                              />
+                              <div className="grid grid-cols-2 gap-2">
+                                <input 
+                                  type="number" 
+                                  step="0.01" 
+                                  value={editForm.cost} 
+                                  onChange={e => setEditForm({...editForm, cost: e.target.value})}
+                                  className="w-full glass-input rounded px-2 py-1 text-xs" 
+                                  placeholder="Cost ($)"
+                                />
+                                <input 
+                                  type="date" 
+                                  value={editForm.renewalDate} 
+                                  onChange={e => setEditForm({...editForm, renewalDate: e.target.value})}
+                                  className="w-full glass-input rounded px-2 py-1 text-xs" 
+                                />
+                              </div>
+                              <div className="flex gap-2 justify-end pt-1">
+                                <button onClick={() => setEditingId(null)} className="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Cancel</button>
+                                <button onClick={() => saveEdit(sub.id, sub.name)} className="text-xs bg-arc hover:bg-arcDark text-slate-950 px-3 py-1 font-bold rounded">Save</button>
+                              </div>
                             </div>
-                          </td>
-                        </tr>
-                      ) : jobs.length === 0 ? (
+                          ) : (
+                            // Standard Card Mode
+                            <div className="flex flex-col h-full justify-between">
+                              <div>
+                                <div className="flex justify-between items-start mb-1">
+                                  <h3 className="text-lg font-bold text-white truncate max-w-[150px]">{sub.name}</h3>
+                                  <span className="text-base font-bold text-green-400 font-mono">${(Number(sub.amount) / 1000000).toFixed(2)}</span>
+                                </div>
+                                <p className="text-gray-400 text-xs font-mono">Renews: {sub.renewalDate.toLocaleDateString()}</p>
+                              </div>
+
+                              <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  {sub.active ? (
+                                    isUrgent ? (
+                                      <span className="bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded text-[10px] font-bold">
+                                        🚨 {daysLeft} days left
+                                      </span>
+                                    ) : (
+                                      <span className="bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded text-[10px] font-bold">
+                                        🛡️ {daysLeft} days left
+                                      </span>
+                                    )
+                                  ) : (
+                                    <span className="bg-gray-800 text-gray-500 border border-gray-700 px-2 py-0.5 rounded text-[10px] font-bold">
+                                      ❌ Cancelled
+                                    </span>
+                                  )}
+                                </div>
+
+                                {sub.active && (
+                                  <div className="flex items-center gap-2">
+                                    <button 
+                                      onClick={() => startEditing(sub)}
+                                      className="text-xs text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 p-1.5 rounded transition-all"
+                                      title="Edit details"
+                                    >
+                                      ✏️
+                                    </button>
+                                    
+                                    <button 
+                                      onClick={() => cancelSubTrigger(sub.name)}
+                                      disabled={isCancelling}
+                                      className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 hover:text-red-300 text-xs px-2.5 py-1 font-bold rounded transition-all flex items-center gap-1 disabled:opacity-50"
+                                    >
+                                      {isCancelling ? (
+                                        <span className="animate-spin inline-block w-3 h-3 border-2 border-red-400 border-t-transparent rounded-full"></span>
+                                      ) : '🚫'}
+                                      Escrow Cancel
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+
+              {/* Blockchain on-chain job list */}
+              <section>
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-lg font-bold uppercase tracking-wider text-gray-300 flex items-center gap-2">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-arc"></span>
+                    On-Chain Escrow History
+                  </h2>
+                  <span className="text-[10px] text-gray-500 font-mono">Syncing block-chunk logs live...</span>
+                </div>
+                <div className="glass-card rounded-2xl overflow-hidden shadow-2xl">
+                  <div className="max-h-[300px] overflow-y-auto scrollbar-thin">
+                    <table className="w-full text-left text-sm text-gray-400">
+                      <thead className="text-xs uppercase bg-gray-900/80 text-gray-400 border-b border-gray-800 sticky top-0 z-10">
                         <tr>
-                          <td colSpan="4" className="px-6 py-8 text-center text-gray-500">No jobs created yet.</td>
+                          <th className="px-6 py-3.5 font-bold">Job ID</th>
+                          <th className="px-6 py-3.5 font-bold">Tx Hash</th>
+                          <th className="px-6 py-3.5 font-bold">Status</th>
+                          <th className="px-6 py-3.5 font-bold">Verification</th>
                         </tr>
-                      ) : (
-                        jobs.map((job, idx) => (
-                          <tr key={idx} className="border-b border-gray-800 hover:bg-gray-800/30 transition-colors">
-                            <td className="px-6 py-4 font-mono font-medium text-white">{job.jobId}</td>
-                            <td className="px-6 py-4 font-mono">
-                              <a href={`https://testnet.arcscan.app/tx/${job.txHash}`} target="_blank" className="text-arc hover:underline">
-                                {truncateAddress(job.txHash)}
-                              </a>
+                      </thead>
+                      <tbody>
+                        {!jobs ? (
+                          <tr>
+                            <td colSpan="4" className="px-6 py-10 text-center">
+                              <div className="animate-pulse flex flex-col items-center space-y-2">
+                                <div className="h-4 bg-gray-800 rounded w-1/4"></div>
+                                <div className="text-xs text-gray-500">Querying Arc Explorer RPC...</div>
+                              </div>
                             </td>
-                            <td className="px-6 py-4">
-                              <span className={`px-2 py-1 rounded-md text-xs font-semibold ${
-                                job.status === 'Completed' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
-                              }`}>
-                                {job.status}
-                              </span>
-                            </td>
-                            <td className="px-6 py-4 italic truncate max-w-[150px]">{job.reason}</td>
                           </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
+                        ) : jobs.length === 0 ? (
+                          <tr>
+                            <td colSpan="4" className="px-6 py-10 text-center text-gray-500">No on-chain cancellations captured in scanned block ranges.</td>
+                          </tr>
+                        ) : (
+                          jobs.map((job, idx) => (
+                            <tr key={idx} className="border-b border-gray-900 hover:bg-gray-900/30 transition-colors">
+                              <td className="px-6 py-4 font-mono font-medium text-white">#{job.jobId}</td>
+                              <td className="px-6 py-4 font-mono text-xs">
+                                <a href={`https://testnet.arcscan.app/tx/${job.txHash}`} target="_blank" className="text-arc hover:underline">
+                                  {truncateAddress(job.txHash)}
+                                </a>
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className={`px-2 py-1 rounded text-[10px] font-bold tracking-wider uppercase ${
+                                  job.status === 'Completed' ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
+                                }`}>
+                                  {job.status}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className={`text-xs ${
+                                  job.reason === 'Cancellation Verified' ? 'text-arc font-semibold' : 'text-gray-500 font-mono'
+                                }`}>
+                                  {job.reason}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </section>
 
             </div>
+          </div>
 
-            {/* Right Sidebar (Reputation Panel) */}
-            <div className="lg:col-span-1">
-              <div className="glass-card rounded-2xl p-6 sticky top-10 flex flex-col items-center text-center shadow-[0_0_30px_rgba(0,209,255,0.05)] border-t-2 border-t-arc/40">
-                <div className="w-16 h-16 rounded-2xl bg-arc/20 flex items-center justify-center mb-4 border border-arc/40">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-arc" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
-                  </svg>
+          {/* Reputation Sidebar placed at the bottom span for cleaner horizontal profile */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className="lg:col-span-3">
+              <div className="glass-card rounded-2xl p-6 shadow-2xl flex flex-col md:flex-row items-center justify-between border-t-2 border-t-arc/40 relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-arc/5 rounded-full blur-3xl pointer-events-none"></div>
+                <div className="flex items-center gap-4">
+                  <div className="w-14 h-14 rounded-xl bg-arc/10 flex items-center justify-center border border-arc/20 shadow-[0_0_15px_rgba(0,209,255,0.1)]">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7 text-arc" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">On-Chain Provider Reputation</h3>
+                    <p className="text-xs text-gray-400 font-mono mt-0.5">ERC-8004 Rating Registry Log</p>
+                  </div>
                 </div>
-                <h3 className="text-xl font-bold text-white mb-1">Agent Reputation</h3>
-                <p className="text-sm text-gray-400 mb-6">ERC-8004 Registry</p>
 
-                {!reputation ? (
-                  <div className="animate-pulse space-y-4 w-full">
-                    <div className="h-16 bg-gray-800 rounded-lg mx-auto w-24"></div>
-                    <div className="h-4 bg-gray-800 rounded mx-auto w-3/4"></div>
-                  </div>
-                ) : (
-                  <div className="w-full">
-                    <div className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-arc to-blue-500 mb-4 drop-shadow-[0_0_15px_rgba(0,209,255,0.4)]">
-                      {reputation.score}
+                <div className="mt-4 md:mt-0 flex items-center gap-6">
+                  {!reputation ? (
+                    <div className="animate-pulse flex items-center gap-3">
+                      <div className="h-10 bg-gray-800 rounded w-16"></div>
+                      <div className="h-6 bg-gray-800 rounded w-28"></div>
                     </div>
-                    <div className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
-                      <span className="text-xs uppercase text-gray-500 font-semibold tracking-wider block mb-1">Latest Tag</span>
-                      <span className="text-sm font-mono text-gray-300 bg-gray-900 px-2 py-1 rounded inline-block">
-                        {reputation.tag}
-                      </span>
+                  ) : (
+                    <div className="flex items-center gap-6">
+                      <div className="text-right">
+                        <span className="text-[10px] uppercase text-gray-500 font-bold block">Dynamic Rating Score</span>
+                        <span className="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-arc to-blue-400 drop-shadow-[0_0_10px_rgba(0,209,255,0.3)]">
+                          {reputation.score}/100
+                        </span>
+                      </div>
+                      <div className="bg-gray-900/60 rounded-lg py-2 px-4 border border-gray-800">
+                        <span className="text-[9px] uppercase text-gray-500 font-bold block mb-0.5">Feedback Event Tag</span>
+                        <span className="text-xs font-mono text-arc font-semibold">{reputation.tag}</span>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
-
           </div>
+
         </div>
       );
     }
