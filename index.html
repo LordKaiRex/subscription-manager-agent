@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Agent Escrow Subscription Manager</title>
+  <title>SubManager - Subscription Agent</title>
   
   <!-- Tailwind CSS v3 -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -224,13 +224,38 @@
           const TOPIC_JOB_COMPLETED = '0x869e2577b006bf47ee981cf6fec2e25583548081c14b98deab587f77b5068038';
           const TOPIC_FEEDBACK_GIVEN = '0x6a4a61743519c9d648a14e6493f47dbe3ff1aa29e7785c96c8326a205e58febc';
 
-          // 1. Fetch Jobs
+          // 1. Fetch cached jobs database from backend to extract names
+          let dbJobs = { activeJobs: [] };
+          try {
+            const jobsRes = await fetch(`${API_URL}/jobs`);
+            if (jobsRes.ok) {
+              dbJobs = await jobsRes.json();
+            }
+          } catch (e) {
+            console.warn("Failed to fetch jobs from API:");
+          }
+
+          // 2. Fetch Jobs logs from blockchain
           const createdLogs = await fetchLogsChunked(AGENTIC_COMMERCE_ADDRESS, [TOPIC_JOB_CREATED]);
           const completedLogs = await fetchLogsChunked(AGENTIC_COMMERCE_ADDRESS, [TOPIC_JOB_COMPLETED]);
           
           const parsedJobs = createdLogs.map(log => {
             const jobIdHex = log.topics[1];
             const jobId = parseInt(jobIdHex, 16);
+            
+            // Find subscription name from description in data/jobs.json
+            const matchingDbJob = dbJobs.activeJobs.find(dj => dj.jobId === jobId.toString());
+            let serviceName = '-';
+            if (matchingDbJob && matchingDbJob.meta && matchingDbJob.meta.description) {
+              const desc = matchingDbJob.meta.description;
+              if (desc.startsWith('Cancel: ')) {
+                serviceName = desc.substring(8);
+              } else if (desc.startsWith('Cancel subscription: ')) {
+                serviceName = desc.substring(21);
+              } else {
+                serviceName = desc;
+              }
+            }
             
             const completedLog = completedLogs.find(cl => parseInt(cl.topics[1], 16) === jobId);
             let status = 'Active / Pending';
@@ -240,7 +265,12 @@
               
               // Correctly map bytes32 keccak256 hash or truncate
               const rawReason = completedLog.data.toLowerCase();
-              if (rawReason.includes('d8bf7293833406352eec85307307ebdbf48a434a87204e7a67d1750cf11a2145')) {
+              if (
+                rawReason.includes('d8bf7293833406352eec85307307ebdbf48a434a87204e7a67d1750cf11a2145') || 
+                rawReason === '' || 
+                rawReason.includes('0000000000000000000000000000000000000000') ||
+                rawReason === '0x'
+              ) {
                 reason = 'Cancellation Verified';
               } else {
                 reason = rawReason.length > 10 ? rawReason.substring(0, 10) + '...' : rawReason;
@@ -249,6 +279,7 @@
 
             return {
               jobId,
+              serviceName,
               txHash: log.transactionHash,
               status,
               reason
@@ -257,7 +288,7 @@
           
           setJobs(parsedJobs);
 
-          // 2. Fetch Reputation score
+          // 3. Fetch Reputation score
           const agentIdHex = '0x' + parseInt(agentConfig.agentId).toString(16).padStart(64, '0');
           const feedbackLogs = await fetchLogsChunked(REPUTATION_REGISTRY_ADDRESS, [TOPIC_FEEDBACK_GIVEN, agentIdHex]);
           
@@ -319,7 +350,12 @@
             body: JSON.stringify(newSub)
           });
           if (res.ok) {
-            showNotification(`Registered subscription for '${newSub.name}'!`);
+            const data = await res.json();
+            if (data.message) {
+              showNotification(data.message);
+            } else {
+              showNotification(`Registered subscription for '${newSub.name}'!`);
+            }
             setNewSub({ name: '', cost: '', renewalDate: '' });
             loadSubscriptions();
           } else {
@@ -334,7 +370,7 @@
       const registerPresetService = async (service) => {
         const payload = {
           name: service.name,
-          amount: service.cost.toString(),
+          cost: service.cost.toString(),
           // Default renewal is 5 days from now for instant demo trigger
           renewalDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString().substring(0, 10)
         };
@@ -346,7 +382,12 @@
             body: JSON.stringify(payload)
           });
           if (res.ok) {
-            showNotification(`Added ${service.name} preset instantly!`);
+            const data = await res.json();
+            if (data.message) {
+              showNotification(data.message);
+            } else {
+              showNotification(`Added ${service.name} preset instantly!`);
+            }
             loadSubscriptions();
           } else {
             const data = await res.json();
@@ -373,7 +414,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               name: editForm.name,
-              amount: editForm.cost,
+              cost: editForm.cost,
               renewalDate: editForm.renewalDate
             })
           });
@@ -453,7 +494,7 @@
             <div className="absolute top-0 right-0 w-32 h-32 bg-arc/5 rounded-full blur-3xl pointer-events-none"></div>
             <div>
               <h1 className="text-3xl font-extrabold tracking-tight text-white flex flex-wrap items-center gap-3">
-                🤖 Escrow Manager <span className="text-arc text-xs font-bold bg-arc/10 px-3 py-1 rounded-full border border-arc/20 uppercase tracking-widest font-mono">Agent ID: {agentConfig.agentId}</span>
+                🤖 SubManager <span className="text-arc text-xs font-bold bg-arc/10 px-3 py-1 rounded-full border border-arc/20 uppercase tracking-widest font-mono">Agent ID: {agentConfig.agentId}</span>
               </h1>
               <p className="text-gray-400 mt-2 font-mono text-xs flex flex-col gap-1">
                 <span>Owner: <span className="text-gray-200">{agentConfig.ownerAddress}</span></span>
@@ -685,7 +726,7 @@
                 <div className="flex justify-between items-center mb-4">
                   <h2 className="text-lg font-bold uppercase tracking-wider text-gray-300 flex items-center gap-2">
                     <span className="inline-block w-2.5 h-2.5 rounded-full bg-arc"></span>
-                    On-Chain Escrow History
+                    On-Chain History
                   </h2>
                   <span className="text-[10px] text-gray-500 font-mono">Syncing block-chunk logs live...</span>
                 </div>
@@ -695,15 +736,16 @@
                       <thead className="text-xs uppercase bg-gray-900/80 text-gray-400 border-b border-gray-800 sticky top-0 z-10">
                         <tr>
                           <th className="px-6 py-3.5 font-bold">Job ID</th>
+                          <th className="px-6 py-3.5 font-bold">Service</th>
                           <th className="px-6 py-3.5 font-bold">Tx Hash</th>
                           <th className="px-6 py-3.5 font-bold">Status</th>
-                          <th className="px-6 py-3.5 font-bold">Verification</th>
+                          <th className="px-6 py-3.5 font-bold">Reason</th>
                         </tr>
                       </thead>
                       <tbody>
                         {!jobs ? (
                           <tr>
-                            <td colSpan="4" className="px-6 py-10 text-center">
+                            <td colSpan="5" className="px-6 py-10 text-center">
                               <div className="animate-pulse flex flex-col items-center space-y-2">
                                 <div className="h-4 bg-gray-800 rounded w-1/4"></div>
                                 <div className="text-xs text-gray-500">Querying Arc Explorer RPC...</div>
@@ -712,12 +754,13 @@
                           </tr>
                         ) : jobs.length === 0 ? (
                           <tr>
-                            <td colSpan="4" className="px-6 py-10 text-center text-gray-500">No on-chain cancellations captured in scanned block ranges.</td>
+                            <td colSpan="5" className="px-6 py-10 text-center text-gray-500">No on-chain cancellations captured in scanned block ranges.</td>
                           </tr>
                         ) : (
                           jobs.map((job, idx) => (
                             <tr key={idx} className="border-b border-gray-900 hover:bg-gray-900/30 transition-colors">
                               <td className="px-6 py-4 font-mono font-medium text-white">#{job.jobId}</td>
+                              <td className="px-6 py-4 font-bold text-white uppercase tracking-wide">{job.serviceName}</td>
                               <td className="px-6 py-4 font-mono text-xs">
                                 <a href={`https://testnet.arcscan.app/tx/${job.txHash}`} target="_blank" className="text-arc hover:underline">
                                   {truncateAddress(job.txHash)}
@@ -733,7 +776,7 @@
                               <td className="px-6 py-4">
                                 <span className={`text-xs ${
                                   job.reason === 'Cancellation Verified' ? 'text-arc font-semibold' : 'text-gray-500 font-mono'
-                                }`}>
+                                }`}`}>
                                   {job.reason}
                                 </span>
                               </td>
@@ -761,7 +804,7 @@
                     </svg>
                   </div>
                   <div>
-                    <h3 className="text-lg font-bold text-white">On-Chain Provider Reputation</h3>
+                    <h3 className="text-lg font-bold text-white font-semibold">SubManager Agent Reputation</h3>
                     <p className="text-xs text-gray-400 font-mono mt-0.5">ERC-8004 Rating Registry Log</p>
                   </div>
                 </div>

@@ -94,8 +94,29 @@ export function watchJobs() {
         const { jobId, client, provider, evaluator, expiredAt, hook } = log.args;
         if (jobId !== undefined) {
           console.log(`✅ New job detected! JobID: ${jobId.toString()}`);
-          activeJobs.set(jobId, { client, provider, evaluator, expiredAt, hook });
-          saveJobs();
+          
+          // Fetch job details including description from on-chain contract
+          publicClient.readContract({
+            address: AGENTIC_COMMERCE_ADDRESS,
+            abi: agenticCommerceAbi,
+            //@ts-ignore
+            functionName: 'getJob',
+            args: [jobId]
+          }).then((jobDetail: any) => {
+            activeJobs.set(jobId, {
+              client: jobDetail.client,
+              provider: jobDetail.provider,
+              evaluator: jobDetail.evaluator,
+              expiredAt: jobDetail.expiredAt,
+              hook: jobDetail.hook,
+              description: jobDetail.description
+            });
+            saveJobs();
+          }).catch(err => {
+            console.error(`Failed to fetch job details for ${jobId}:`, err);
+            activeJobs.set(jobId, { client, provider, evaluator, expiredAt, hook, description: '' });
+            saveJobs();
+          });
         }
       }
     }
@@ -122,7 +143,8 @@ export async function executeCancellationJob(subName: string, agentId: bigint) {
 
   try {
     const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 86400); // 1 day
-    
+    const jobDescription = `Cancel: ${subName}`;
+
     // 1. createJob (Owner)
     console.log(`\n[1/6] Creating Job for ${subName}...`);
     const { request: createReq, result: jobIdResult } = await publicClient.simulateContract({
@@ -134,7 +156,7 @@ export async function executeCancellationJob(subName: string, agentId: bigint) {
         validatorAccount.address, // provider
         ownerAccount.address,     // evaluator
         expiredAt,
-        `Cancel: ${subName}`,
+        jobDescription,
         '0x0000000000000000000000000000000000000000' // hook address(0)
       ]
     });
@@ -142,7 +164,18 @@ export async function executeCancellationJob(subName: string, agentId: bigint) {
     await publicClient.waitForTransactionReceipt({ hash: txHashCreate });
     const jobId = jobIdResult as bigint;
     inProgressJobs.set(subName, jobId);
+    
+    // Save to activeJobs maps
+    activeJobs.set(jobId, {
+      client: ownerAccount.address,
+      provider: validatorAccount.address,
+      evaluator: ownerAccount.address,
+      expiredAt,
+      hook: '0x0000000000000000000000000000000000000000',
+      description: jobDescription
+    });
     saveJobs();
+    
     console.log(`✅ Job created: ${jobId.toString()}`);
 
     // 2. setBudget (Validator)

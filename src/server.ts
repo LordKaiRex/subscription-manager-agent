@@ -1,13 +1,18 @@
 import express from 'express';
 import cors from 'cors';
 import { loadSubscriptions, saveSubscriptions, cancelSubscription, Subscription } from './subscriptions.js';
-import { executeCancellationJob } from './jobs.js';
+import { executeCancellationJob, loadJobs } from './jobs.js';
 import { checkAndProcessRenewals } from './checker.js';
 import { initializeAgent } from './agent.js';
 import { ownerAccount, validatorAccount } from './config.js';
 
 const app = express();
 const PORT = 3001;
+
+// Override global Express JSON serialization to handle BigInts cleanly
+app.set('json replacer', (key: string, value: unknown) =>
+  typeof value === 'bigint' ? value.toString() : value
+);
 
 app.use(cors());
 app.use(express.json());
@@ -43,36 +48,70 @@ app.get('/subscriptions', (req, res) => {
   }
 });
 
-// POST /subscriptions - adds a new subscription
+// GET /jobs - returns persisted jobs metadata (for history description stitching)
+app.get('/jobs', (req, res) => {
+  try {
+    const data = loadJobs();
+    res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /subscriptions - adds or reactivates a subscription
 app.post('/subscriptions', (req, res) => {
   try {
-    const { name, amount, renewalDate } = req.body;
-    if (!name || amount === undefined || !renewalDate) {
-      res.status(400).json({ error: 'Missing name, amount, or renewalDate' });
+    const { name, amount, cost, costUSDC, renewalDate } = req.body;
+    
+    // Support amount, cost, or costUSDC
+    const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
+
+    if (!name || rawCost === undefined || !renewalDate) {
+      res.status(400).json({ error: 'Missing name, cost/amount, or renewalDate' });
       return;
     }
 
     const list = loadSubscriptions();
-    
-    // Check if subscription already exists
-    if (list.some(s => s.name.toLowerCase() === name.toLowerCase())) {
-      res.status(400).json({ error: `Subscription '${name}' already exists` });
+    const existingIndex = list.findIndex(s => s.name.toLowerCase() === name.toLowerCase());
+
+    const numericCost = parseFloat(rawCost);
+    if (isNaN(numericCost) || numericCost < 0) {
+      res.status(400).json({ error: 'Cost must be a positive number' });
       return;
     }
+    const usdcBigInt = BigInt(Math.round(numericCost * 1_000_000));
+    const parsedDate = new Date(renewalDate);
 
-    // Convert amount from USD (e.g. 15.99) to USDC 6 decimals
-    const numericAmount = parseFloat(amount);
-    if (isNaN(numericAmount) || numericAmount < 0) {
-      res.status(400).json({ error: 'Amount must be a positive number' });
-      return;
+    // Duplicate Handling:
+    if (existingIndex !== -1) {
+      const existingSub = list[existingIndex];
+      
+      if (!existingSub.active) {
+        // Reactivate & Update
+        existingSub.active = true;
+        existingSub.amount = usdcBigInt;
+        existingSub.renewalDate = parsedDate;
+        saveSubscriptions(list);
+        console.log(`🔄 Reactivated and updated inactive subscriptionpreset: ${name} ($${numericCost})`);
+        res.json(existingSub);
+        return;
+      } else {
+        // Return 200 with friendly message
+        console.log(`ℹ️ Preset click ignored: ${name} is already active`);
+        res.json({ 
+          message: 'Already active — use Edit to update it',
+          subscription: existingSub
+        });
+        return;
+      }
     }
-    const usdcBigInt = BigInt(Math.round(numericAmount * 1_000_000));
 
+    // New Subscription
     const newSub: Subscription = {
       id: `sub-${Date.now()}`,
       name,
       clientAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
-      renewalDate: new Date(renewalDate),
+      renewalDate: parsedDate,
       amount: usdcBigInt,
       active: true
     };
@@ -80,7 +119,7 @@ app.post('/subscriptions', (req, res) => {
     list.push(newSub);
     saveSubscriptions(list);
 
-    console.log(`➕ Added new subscription: ${name} ($${amount})`);
+    console.log(`➕ Added new subscription: ${name} ($${numericCost})`);
     res.status(201).json(newSub);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -91,7 +130,7 @@ app.post('/subscriptions', (req, res) => {
 app.put('/subscriptions/:name', (req, res) => {
   try {
     const targetName = req.params.name;
-    const { name, amount, renewalDate } = req.body;
+    const { name, amount, cost, costUSDC, renewalDate } = req.body;
 
     const list = loadSubscriptions();
     const subIndex = list.findIndex(s => s.name.toLowerCase() === targetName.toLowerCase());
@@ -104,7 +143,7 @@ app.put('/subscriptions/:name', (req, res) => {
     const sub = list[subIndex];
 
     if (name) {
-      // If changing name, ensure new name is not a duplicate
+      // If changing name, ensure new name is not a duplicate of another contract
       if (name.toLowerCase() !== targetName.toLowerCase() && list.some(s => s.name.toLowerCase() === name.toLowerCase())) {
         res.status(400).json({ error: `Subscription '${name}' already exists` });
         return;
@@ -112,13 +151,14 @@ app.put('/subscriptions/:name', (req, res) => {
       sub.name = name;
     }
 
-    if (amount !== undefined) {
-      const numericAmount = parseFloat(amount);
-      if (isNaN(numericAmount) || numericAmount < 0) {
-        res.status(400).json({ error: 'Amount must be a positive number' });
+    const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
+    if (rawCost !== undefined) {
+      const numericCost = parseFloat(rawCost);
+      if (isNaN(numericCost) || numericCost < 0) {
+        res.status(400).json({ error: 'Cost must be a positive number' });
         return;
       }
-      sub.amount = BigInt(Math.round(numericAmount * 1_000_000));
+      sub.amount = BigInt(Math.round(numericCost * 1_000_000));
     }
 
     if (renewalDate) {
