@@ -92,6 +92,31 @@
     const RPC_URL = 'https://rpc.testnet.arc.network';
     const API_URL = 'http://localhost:3001';
 
+    // React Error Boundary to catch render failures
+    class ErrorBoundary extends React.Component {
+      state = { error: null };
+      static getDerivedStateFromError(error) { 
+        return { error: error.message || String(error) }; 
+      }
+      componentDidCatch(error, errorInfo) {
+        console.error("ErrorBoundary caught an uncaught error:", error, errorInfo);
+      }
+      render() {
+        if (this.state.error) {
+          return React.createElement('div', 
+            { style: { color: '#ff6b6b', padding: '2.5rem', background: '#111827', borderRadius: '1rem', border: '1px solid rgba(255, 107, 107, 0.2)', fontFamily: 'monospace', maxWidth: '600px', margin: '2rem auto' } },
+            React.createElement('h2', { style: { marginTop: 0 } }, '❌ SubManager Dashboard Crash'),
+            React.createElement('pre', { style: { whiteSpace: 'pre-wrap', background: 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: '0.5rem' } }, this.state.error),
+            React.createElement('button', { 
+              onClick: () => window.location.reload(),
+              style: { background: '#00D1FF', color: '#000', border: 'none', padding: '0.5rem 1rem', borderRadius: '0.25rem', cursor: 'pointer', fontWeight: 'bold', marginTop: '1rem' }
+            }, 'Reload Dashboard')
+          );
+        }
+        return this.props.children;
+      }
+    }
+
     const POPULAR_SERVICES = [
       { name: 'Netflix', cost: 15.99, color: 'hover:border-red-500/40 text-red-400 bg-red-500/5' },
       { name: 'Spotify', cost: 9.99, color: 'hover:border-green-500/40 text-green-400 bg-green-500/5' },
@@ -108,17 +133,16 @@
     const truncateAddress = (addr) => addr ? `${addr.substring(0, 6)}...${addr.substring(addr.length - 4)}` : '';
 
     function App() {
-      // Configuration state resolved dynamically from API
+      // Graceful Default State Initialization (safeguards against API/JSON exceptions)
       const [agentConfig, setAgentConfig] = useState({ 
-        agentId: '1', 
-        ownerAddress: '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0',
-        validatorAddress: ''
+        agentId: '...', 
+        ownerAddress: '...',
+        validatorAddress: '...'
       });
 
-      // UI Subscriptions List
       const [subscriptions, setSubscriptions] = useState([]);
-      const [jobs, setJobs] = useState(null);
-      const [reputation, setReputation] = useState(null);
+      const [jobs, setJobs] = useState([]);
+      const [reputation, setReputation] = useState({ score: 0, tag: 'Loading...' });
       const [notif, setNotif] = useState(null);
 
       // Forms
@@ -144,6 +168,7 @@
             body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 })
           });
           const blockData = await blockRes.json();
+          if (!blockData || !blockData.result) return [];
           const latestBlock = parseInt(blockData.result, 16);
 
           const CHUNK_SIZE = 9999;
@@ -171,11 +196,14 @@
                 params: [{ address, topics, fromBlock: req.fromHex, toBlock: req.toHex }],
                 id: 1
               })
-            }).then(r => r.json())
+            }).then(r => r.json()).catch(err => {
+              console.error("fetchLogs chunk failed:", err);
+              return { result: [] };
+            })
           ));
           
           for (const data of results) {
-            if (data.result && Array.isArray(data.result)) {
+            if (data && data.result && Array.isArray(data.result)) {
               allLogs.push(...data.result);
             }
           }
@@ -192,10 +220,14 @@
           const res = await fetch(`${API_URL}/agent`);
           if (res.ok) {
             const data = await res.json();
-            setAgentConfig(data);
+            setAgentConfig({
+              agentId: data.agentId || '...',
+              ownerAddress: data.ownerAddress || '...',
+              validatorAddress: data.validatorAddress || '...'
+            });
           }
         } catch (e) {
-          console.warn("Express API unreachable. Using static client fallback configuration.");
+          console.warn("Express API /agent unreachable. Running in offline fallback mode:", e);
         }
       };
 
@@ -205,12 +237,15 @@
           const res = await fetch(`${API_URL}/subscriptions`);
           if (res.ok) {
             const list = await res.json();
-            const formatted = list.map(sub => ({
-              ...sub,
-              amount: BigInt(sub.amount),
-              renewalDate: new Date(sub.renewalDate)
-            }));
-            setSubscriptions(formatted);
+            if (Array.isArray(list)) {
+              const formatted = list.map(sub => ({
+                ...sub,
+                // Keep amount as number or string to completely avoid BigInt React rendering crash!
+                amount: sub.amount ? String(sub.amount) : '0', 
+                renewalDate: new Date(sub.renewalDate)
+              }));
+              setSubscriptions(formatted);
+            }
           }
         } catch (e) {
           console.error("Failed to load subscriptions from backend:", e);
@@ -232,7 +267,7 @@
               dbJobs = await jobsRes.json();
             }
           } catch (e) {
-            console.warn("Failed to fetch jobs from API:");
+            console.warn("Failed to fetch jobs from local database:", e);
           }
 
           // 2. Fetch Jobs logs from blockchain
@@ -244,7 +279,7 @@
             const jobId = parseInt(jobIdHex, 16);
             
             // Find subscription name from description in data/jobs.json
-            const matchingDbJob = dbJobs.activeJobs.find(dj => dj.jobId === jobId.toString());
+            const matchingDbJob = dbJobs && dbJobs.activeJobs ? dbJobs.activeJobs.find(dj => dj.jobId === jobId.toString()) : null;
             let serviceName = '-';
             if (matchingDbJob && matchingDbJob.meta && matchingDbJob.meta.description) {
               const desc = matchingDbJob.meta.description;
@@ -289,7 +324,12 @@
           setJobs(parsedJobs);
 
           // 3. Fetch Reputation score
-          const agentIdHex = '0x' + parseInt(agentConfig.agentId).toString(16).padStart(64, '0');
+          const numericAgentId = parseInt(agentConfig.agentId);
+          if (isNaN(numericAgentId)) {
+            setReputation({ score: 0, tag: 'Agent ID invalid' });
+            return;
+          }
+          const agentIdHex = '0x' + numericAgentId.toString(16).padStart(64, '0');
           const feedbackLogs = await fetchLogsChunked(REPUTATION_REGISTRY_ADDRESS, [TOPIC_FEEDBACK_GIVEN, agentIdHex]);
           
           if (feedbackLogs.length > 0) {
@@ -743,16 +783,7 @@
                         </tr>
                       </thead>
                       <tbody>
-                        {!jobs ? (
-                          <tr>
-                            <td colSpan="5" className="px-6 py-10 text-center">
-                              <div className="animate-pulse flex flex-col items-center space-y-2">
-                                <div className="h-4 bg-gray-800 rounded w-1/4"></div>
-                                <div className="text-xs text-gray-500">Querying Arc Explorer RPC...</div>
-                              </div>
-                            </td>
-                          </tr>
-                        ) : jobs.length === 0 ? (
+                        {jobs.length === 0 ? (
                           <tr>
                             <td colSpan="5" className="px-6 py-10 text-center text-gray-500">No on-chain cancellations captured in scanned block ranges.</td>
                           </tr>
@@ -776,7 +807,7 @@
                               <td className="px-6 py-4">
                                 <span className={`text-xs ${
                                   job.reason === 'Cancellation Verified' ? 'text-arc font-semibold' : 'text-gray-500 font-mono'
-                                }`}`}>
+                                }`}>
                                   {job.reason}
                                 </span>
                               </td>
@@ -839,7 +870,11 @@
     }
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    root.render(
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    );
   </script>
 </body>
 </html>
