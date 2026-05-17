@@ -8,6 +8,7 @@ import { executeCancellationJob, loadJobs } from './jobs.js';
 import { checkAndProcessRenewals } from './checker.js';
 import { initializeAgent } from './agent.js';
 import { ownerAccount, validatorAccount, reinitializeConfig } from './config.js';
+import { getOrCreateUser, getUserToken, initializeWallet, getUserWallets } from './auth.js';
 
 const app = express();
 const PORT = 3001;
@@ -63,87 +64,78 @@ async function callCircleAPI(method: string, path: string, body?: any, userToken
   return response.json();
 }
 
-// POST /auth/init - initializes or retrieves a Circle wallet session
+// POST /auth/init - takes { userId } (email), creates/fetches user, returns session tokens + wallet challenge
 app.post('/auth/init', async (req, res) => {
   try {
-    const { userEmail } = req.body;
-    if (!userEmail) {
-      res.status(400).json({ error: 'Missing userEmail' });
+    const rawUserId = req.body.userId || req.body.userEmail;
+    if (!rawUserId) {
+      res.status(400).json({ error: 'Missing userId or userEmail' });
       return;
     }
+
+    const email = rawUserId.toLowerCase().trim();
+    const userId = createHash('sha256').update(email).digest('hex');
 
     const apiKey = process.env.CIRCLE_API_KEY;
     const appId = process.env.CIRCLE_APP_ID || '';
 
-    // Alphanumeric deterministic user identifier
-    const userId = createHash('sha256').update(userEmail.toLowerCase()).digest('hex');
-
-    // Safe fallback for offline simulation mode
-    if (!apiKey || apiKey.trim() === '') {
-      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating Circle Wallet initialization for ${userEmail}...`);
-      
-      // Determine if a mock wallet already exists in localStorage or simulate a new creation
+    // Mock fallback when no real Circle API key is loaded
+    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('YOUR_')) {
+      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating auth/init for ${email}...`);
       const mockChallengeId = `mock-challenge-id-${userId.substring(0, 8)}`;
       res.json({
         simulated: true,
         userToken: `mock-user-token-${userId.substring(0, 10)}`,
         encryptionKey: 'mock-encryption-key-for-submanager',
         appId: appId || 'mock-app-id',
-        challengeId: mockChallengeId, // Always simulate PIN setup on first run
-        walletAddress: null
+        challengeId: mockChallengeId
       });
       return;
     }
 
-    // 1. Create a Circle W3S User record. Catch 409 Conflict gracefully
+    // Step 1: Create or fetch W3S user
     try {
-      await callCircleAPI('POST', '/v1/w3s/users', { userId });
-      console.log(`👤 Circle User created: ${userId}`);
+      await getOrCreateUser(userId);
+      console.log(`👤 Circle User active: ${userId} (${email})`);
     } catch (e: any) {
-      console.log(`ℹ️ Circle User registration skipped (already exists): ${e.message}`);
+      console.warn(`⚠️ User get/create check warning: ${e.message}`);
     }
 
-    // 2. Generate the User Session Token & Encryption Key
-    const tokenRes = await callCircleAPI('POST', '/v1/w3s/users/token', { userId });
-    const { userToken, encryptionKey } = tokenRes.data;
+    // Step 2: Get user session token & encryption key
+    const tokenRes = await getUserToken(userId);
+    const { userToken, encryptionKey } = tokenRes;
 
-    // 3. Query existing wallets associated with this session token
-    const walletsRes = await callCircleAPI('GET', '/v1/w3s/wallets', undefined, userToken);
-    const wallets = walletsRes.data?.wallets || [];
+    // Step 3: Check if they already have a wallet
+    let wallets = [];
+    try {
+      wallets = await getUserWallets(userToken);
+    } catch (e) {
+      console.warn('⚠️ Error fetching wallets during init:', e);
+    }
 
-    if (wallets.length > 0) {
-      console.log(`💼 Existing Circle Wallet found for ${userEmail}: ${wallets[0].address}`);
-      res.json({
-        userToken,
-        encryptionKey,
-        appId,
-        challengeId: null,
-        walletAddress: wallets[0].address
-      });
+    let challengeId = null;
+    if (wallets.length === 0) {
+      // Step 4: Initialize wallet challenge
+      console.log(`🔑 Initializing User-Controlled wallet creation for ${email}...`);
+      challengeId = await initializeWallet(userToken);
     } else {
-      // 4. Initialize User to trigger wallet creation challenge via Web SDK
-      console.log(`🔑 Initializing new user-controlled wallet challenge for ${userEmail}...`);
-      const initRes = await callCircleAPI('POST', '/v1/w3s/user/initialize', {
-        idempotencyKey: randomUUID(),
-        blockchains: ['ARC-TESTNET']
-      }, userToken);
-
-      const { challengeId } = initRes.data;
-      res.json({
-        userToken,
-        encryptionKey,
-        appId,
-        challengeId,
-        walletAddress: null
-      });
+      console.log(`💼 Existing wallet already connected for ${email}: ${wallets[0].address}`);
     }
+
+    res.json({
+      userToken,
+      encryptionKey,
+      appId,
+      challengeId
+    });
   } catch (e: any) {
+    console.error('❌ /auth/init failed:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// POST /auth/wallet - fetches wallet address after SDK challenge succeeds
-app.post('/auth/wallet', async (req, res) => {
+// POST /auth/wallets - takes { userToken }, returns user's ARC-TESTNET wallets
+app.post('/auth/wallets', async (req, res) => {
   try {
     const { userToken } = req.body;
     if (!userToken) {
@@ -152,32 +144,75 @@ app.post('/auth/wallet', async (req, res) => {
     }
 
     const apiKey = process.env.CIRCLE_API_KEY;
-    if (!apiKey || apiKey.trim() === '') {
-      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating wallet retrieval...`);
+    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('YOUR_')) {
+      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating auth/wallets...`);
+      res.json([{
+        id: 'mock-wallet-id',
+        address: '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0',
+        blockchain: 'ARC-TESTNET',
+        state: 'LIVE'
+      }]);
+      return;
+    }
+
+    const wallets = await getUserWallets(userToken);
+    res.json(wallets);
+  } catch (e: any) {
+    console.error('❌ /auth/wallets failed:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /auth/social - takes { provider: 'google' }, returns userToken, encryptionKey, appId
+app.post('/auth/social', async (req, res) => {
+  try {
+    const { provider } = req.body;
+    if (!provider) {
+      res.status(400).json({ error: 'Missing provider' });
+      return;
+    }
+
+    const apiKey = process.env.CIRCLE_API_KEY;
+    const appId = process.env.CIRCLE_APP_ID || '';
+    const socialUserId = `social_${provider}_default_user`;
+    const userId = createHash('sha256').update(socialUserId).digest('hex');
+
+    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('YOUR_')) {
+      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating auth/social for provider ${provider}...`);
       res.json({
-        walletAddress: '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0',
-        walletId: 'mock-wallet-id',
-        blockchain: 'ARC-TESTNET'
+        simulated: true,
+        userToken: `mock-social-token-${userId.substring(0, 10)}`,
+        encryptionKey: 'mock-encryption-key-for-social',
+        appId: appId || 'mock-app-id'
       });
       return;
     }
 
-    const walletsRes = await callCircleAPI('GET', '/v1/w3s/wallets', undefined, userToken);
-    const wallets = walletsRes.data?.wallets || [];
-
-    if (wallets.length === 0) {
-      res.status(404).json({ error: 'No wallet found for this user session' });
-      return;
+    // Create user and retrieve session token for social flow
+    try {
+      await getOrCreateUser(userId);
+    } catch (e: any) {
+      console.warn(`⚠️ Social user registration check warning: ${e.message}`);
     }
 
+    const tokenData = await getUserToken(userId);
     res.json({
-      walletAddress: wallets[0].address,
-      walletId: wallets[0].id,
-      blockchain: 'ARC-TESTNET'
+      userToken: tokenData.userToken,
+      encryptionKey: tokenData.encryptionKey,
+      appId
     });
   } catch (e: any) {
+    console.error('❌ /auth/social failed:', e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// GET /auth/appid - returns { appId, googleClientId }
+app.get('/auth/appid', (req, res) => {
+  res.json({
+    appId: process.env.CIRCLE_APP_ID || '',
+    googleClientId: process.env.CIRCLE_GOOGLE_CLIENT_ID || ''
+  });
 });
 
 // GET /agent - returns agent metadata

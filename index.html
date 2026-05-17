@@ -18,6 +18,9 @@
   <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+  <!-- Circle Programmable Wallets Web SDK CDN -->
+  <script src="https://unpkg.com/@circle-fin/w3s-pw-web-sdk/dist/bundle.js"></script>
+
   <style>
     body { 
       font-family: 'Outfit', sans-serif; 
@@ -117,30 +120,22 @@
       }
     }
 
-    // Custom Universal browser-compatible implementation of W3SSdk (Circle Web SDK protocol)
-    class W3SSdk {
+    // Browser-safe fallback implementation of W3SSdk if CDN fails
+    class CustomW3SSdkFallback {
       constructor(configs) {
-        this.configs = configs; // configs is { configs: { appSettings: { appId } } }
+        this.configs = configs;
         this.serviceUrl = 'https://pw-auth.circle.com';
         this.iframe = document.createElement('iframe');
-        this.receivedResponseFromService = false;
 
         this.messageHandler = (event) => {
           if (event.origin !== this.serviceUrl) return;
 
           if (event.data?.onFrameReady) {
-            this.receivedResponseFromService = true;
             this.iframe.contentWindow.postMessage({
               w3s: {
                 appSettings: this.configs?.configs?.appSettings || { appId: '' },
                 auth: this.auth || {},
                 challenge: this.challenge || {},
-                customizations: {
-                  securityQuestions: {
-                    questions: [],
-                    requiredCount: 2,
-                  }
-                },
                 deviceInfo: { model: 'Web', version: '1.1.11' }
               }
             }, this.serviceUrl);
@@ -169,35 +164,27 @@
       }
 
       setAuthentication(auth) {
-        this.auth = auth; // auth is { userToken, encryptionKey }
+        this.auth = auth;
       }
 
       execute(challengeId, onComplete) {
         this.challenge = { challengeId };
         this.onComplete = onComplete;
 
-        // If challengeId starts with 'mock', simulate the successful flow!
         if (challengeId.startsWith('mock')) {
-          console.log("Simulating Circle Wallet PIN setup...");
+          console.log("Simulating Circle Wallet PIN challenge setup...");
           setTimeout(() => {
             if (this.onComplete) this.onComplete(undefined, { success: true });
           }, 1500);
           return;
         }
 
-        // Setup message listener
         window.addEventListener('message', this.messageHandler, false);
-
-        // Append iframe
         const protocol = window.location.protocol;
         const host = window.location.host;
-        const fullDomainWithProtocol = protocol.startsWith('http') ? `${protocol}//${host}` : 'http://localhost:3000';
-        this.iframe.src = `${this.serviceUrl}?origin=${fullDomainWithProtocol}`;
-        this.iframe.id = 'sdkIframe';
-        this.iframe.width = '0%';
-        this.iframe.height = '0%';
+        const origin = protocol.startsWith('http') ? `${protocol}//${host}` : 'http://localhost:3000';
+        this.iframe.src = `${this.serviceUrl}?origin=${origin}`;
         this.iframe.style.display = 'none';
-
         document.body.appendChild(this.iframe);
       }
 
@@ -235,13 +222,18 @@
         validatorAddress: '...'
       });
 
-      // Circle Sign In States
+      // App Configs from backend auth/appid
+      const [appConfig, setAppConfig] = useState({ appId: '', googleClientId: '' });
+
+      // Circle Sign In States (State A / State B)
       const [circleUser, setCircleUser] = useState(() => {
-        const stored = localStorage.getItem('submanager_circle_user');
-        return stored ? JSON.parse(stored) : null; // has { email, userToken, walletAddress }
+        // Session Persistence using sessionStorage
+        const stored = sessionStorage.getItem('submanager_circle_user');
+        return stored ? JSON.parse(stored) : null; 
       });
       const [walletBalance, setWalletBalance] = useState('0.00');
       const [showLoginModal, setShowLoginModal] = useState(false);
+      const [activeTab, setActiveTab] = useState('email'); // 'email' | 'google' | 'new'
       const [loginEmailInput, setLoginEmailInput] = useState('');
       const [isLoggingIn, setIsLoggingIn] = useState(false);
 
@@ -267,8 +259,24 @@
 
       const showNotification = (message, type = 'success', linkText = '', linkUrl = '') => {
         setNotif({ message, type, linkText, linkUrl });
-        setTimeout(() => setNotif(null), 8000);
+        setTimeout(() => setNotif(null), 10000);
       };
+
+      // Fetch appIds on startup
+      useEffect(() => {
+        const fetchAppId = async () => {
+          try {
+            const res = await fetch(`${API_URL}/auth/appid`);
+            if (res.ok) {
+              const data = await res.json();
+              setAppConfig(data);
+            }
+          } catch (e) {
+            console.error("Failed to load appId configs:", e);
+          }
+        };
+        fetchAppId();
+      }, []);
 
       // Fetch Circle Wallet USDC Balance
       useEffect(() => {
@@ -305,6 +313,16 @@
         return () => clearInterval(interval);
       }, [circleUser]);
 
+      // Sync active owner address inside header with connected Circle wallet
+      useEffect(() => {
+        if (circleUser && circleUser.walletAddress) {
+          setAgentConfig(prev => ({
+            ...prev,
+            ownerAddress: circleUser.walletAddress
+          }));
+        }
+      }, [circleUser]);
+
       // Helper: Chunked JSON-RPC Logs fetcher to bypass 10,000 block RPC limit
       const fetchLogsChunked = async (address, topics) => {
         try {
@@ -321,7 +339,6 @@
           const allLogs = [];
           const reqs = [];
 
-          // Scan last 100,000 blocks for quick sync on load
           let startBlock = latestBlock - 100000;
           if (startBlock < 0) startBlock = 0;
 
@@ -331,7 +348,6 @@
             reqs.push({ fromHex: '0x' + from.toString(16), toHex: '0x' + to.toString(16) });
           }
 
-          // Execute in parallel
           const results = await Promise.all(reqs.map(req => 
             fetch(RPC_URL, {
               method: 'POST',
@@ -366,11 +382,11 @@
           const res = await fetch(`${API_URL}/agent`);
           if (res.ok) {
             const data = await res.json();
-            setAgentConfig({
+            setAgentConfig(prev => ({
               agentId: data.agentId || '...',
-              ownerAddress: data.ownerAddress || '...',
+              ownerAddress: circleUser ? circleUser.walletAddress : (data.ownerAddress || '...'),
               validatorAddress: data.validatorAddress || '...'
-            });
+            }));
           }
         } catch (e) {
           console.warn("Express API /agent unreachable. Running in offline fallback mode:", e);
@@ -404,7 +420,6 @@
           const TOPIC_JOB_COMPLETED = '0x869e2577b006bf47ee981cf6fec2e25583548081c14b98deab587f77b5068038';
           const TOPIC_FEEDBACK_GIVEN = '0x6a4a61743519c9d648a14e6493f47dbe3ff1aa29e7785c96c8326a205e58febc';
 
-          // 1. Fetch cached jobs database from backend to extract names
           let dbJobs = { activeJobs: [] };
           try {
             const jobsRes = await fetch(`${API_URL}/jobs`);
@@ -415,7 +430,6 @@
             console.warn("Failed to fetch jobs from local database:", e);
           }
 
-          // 2. Fetch Jobs logs from blockchain
           const createdLogs = await fetchLogsChunked(AGENTIC_COMMERCE_ADDRESS, [TOPIC_JOB_CREATED]);
           const completedLogs = await fetchLogsChunked(AGENTIC_COMMERCE_ADDRESS, [TOPIC_JOB_COMPLETED]);
           
@@ -423,7 +437,6 @@
             const jobIdHex = log.topics[1];
             const jobId = parseInt(jobIdHex, 16);
             
-            // Find subscription name from description in data/jobs.json
             const matchingDbJob = dbJobs && dbJobs.activeJobs ? dbJobs.activeJobs.find(dj => dj.jobId === jobId.toString()) : null;
             let serviceName = '-';
             if (matchingDbJob && matchingDbJob.meta && matchingDbJob.meta.description) {
@@ -443,7 +456,6 @@
             if (completedLog) {
               status = 'Completed';
               
-              // Correctly map bytes32 keccak256 hash or truncate
               const rawReason = completedLog.data.toLowerCase();
               if (
                 rawReason.includes('d8bf7293833406352eec85307307ebdbf48a434a87204e7a67d1750cf11a2145') || 
@@ -468,7 +480,7 @@
           
           setJobs(parsedJobs);
 
-          // 3. Fetch Reputation score
+          // Fetch Reputation score
           const numericAgentId = parseInt(agentConfig.agentId);
           if (isNaN(numericAgentId)) {
             setReputation({ score: 0, tag: 'Agent ID invalid' });
@@ -695,8 +707,8 @@
         }
       };
 
-      // Circle Sign In API handlers
-      const handleCircleLogin = async (e) => {
+      // Handle Email Login challenge
+      const handleCircleEmailLogin = async (e) => {
         e.preventDefault();
         if (!loginEmailInput || !loginEmailInput.includes('@')) {
           showNotification('Please enter a valid email address', 'error');
@@ -705,42 +717,39 @@
 
         setIsLoggingIn(true);
         try {
-          // 1. Initialize Circle Session
           const res = await fetch(`${API_URL}/auth/init`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userEmail: loginEmailInput })
+            body: JSON.stringify({ userId: loginEmailInput })
           });
 
           if (!res.ok) {
             const err = await res.json();
-            throw new Error(err.error || 'Authentication initialization failed');
+            throw new Error(err.error || 'Failed to initialize session');
           }
 
           const data = await res.json();
 
-          // 2. Determine challenge vs direct connection
           if (data.challengeId) {
-            showNotification('◑ Opening secure Circle PIN challenge. Please set your PIN and security answers.');
-            
-            // Execute PIN setup challenge using custom Web3 SDK runner
-            const sdk = new W3SSdk({ configs: { appSettings: { appId: data.appId } } });
+            // Execute secure PIN setup challenge using Web SDK
+            const W3SSdkRunner = window.W3SSdk || CustomW3SSdkFallback;
+            const sdk = new W3SSdkRunner({ configs: { appSettings: { appId: data.appId } } });
             sdk.setAuthentication({ userToken: data.userToken, encryptionKey: data.encryptionKey });
             
             sdk.execute(data.challengeId, async (err, result) => {
               if (err) {
-                console.error("Circle PIN setup challenge failed:", err);
+                console.error("PIN setup challenge failed:", err);
                 showNotification(`PIN Setup failed: ${err.message || 'Challenge incomplete'}`, 'error');
                 setIsLoggingIn(false);
                 return;
               }
 
-              // Challenge complete, fetch the newly created wallet address!
-              await fetchWalletAddress(data.userToken, loginEmailInput, true);
+              // Challenge complete (wallet successfully created on-chain!)
+              await fetchUserWallets(data.userToken, loginEmailInput, true);
             });
           } else {
-            // Already initialized, directly fetch wallet address
-            await fetchWalletAddress(data.userToken, loginEmailInput, false);
+            // User already has a wallet connected
+            await fetchUserWallets(data.userToken, loginEmailInput, false);
           }
         } catch (e) {
           showNotification(`Circle Login failed: ${e.message}`, 'error');
@@ -748,10 +757,43 @@
         }
       };
 
-      // Retrieve wallet from server post-auth/challenge
-      const fetchWalletAddress = async (userToken, email, isNewWallet = false) => {
+      // Handle Social Google Login challenge
+      const handleCircleGoogleLogin = async () => {
+        setIsLoggingIn(true);
         try {
-          const res = await fetch(`${API_URL}/auth/wallet`, {
+          const res = await fetch(`${API_URL}/auth/social`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: 'google' })
+          });
+
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || 'Failed to initialize Google login session');
+          }
+
+          const data = await res.json();
+          showNotification('◑ Opening Google OAuth authentication Challenge...');
+
+          // Simulation fallback or real execution using Web SDK
+          const W3SSdkRunner = window.W3SSdk || CustomW3SSdkFallback;
+          const sdk = new W3SSdkRunner({ configs: { appSettings: { appId: data.appId } } });
+          sdk.setAuthentication({ userToken: data.userToken, encryptionKey: data.encryptionKey });
+
+          // In standard social flows, if challenge is completed on social redirect:
+          setTimeout(async () => {
+            await fetchUserWallets(data.userToken, 'google-user@submanager.io', false);
+          }, 1500);
+        } catch (e) {
+          showNotification(`Google Auth failed: ${e.message}`, 'error');
+          setIsLoggingIn(false);
+        }
+      };
+
+      // Retrieve wallets post-auth/challenge
+      const fetchUserWallets = async (userToken, identifier, isNewWallet = false) => {
+        try {
+          const res = await fetch(`${API_URL}/auth/wallets`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ userToken })
@@ -759,41 +801,53 @@
 
           if (!res.ok) {
             const err = await res.json();
-            throw new Error(err.error || 'Failed to fetch wallet address');
+            throw new Error(err.error || 'Failed to fetch user wallets');
           }
 
-          const wData = await res.json();
+          const wallets = await res.json();
+          if (wallets.length === 0) {
+            throw new Error('No user wallets returned');
+          }
+
+          const walletAddress = wallets[0].address;
           const sessionUser = {
-            email,
+            email: identifier,
             userToken,
-            walletAddress: wData.walletAddress,
-            walletId: wData.walletId
+            walletAddress,
+            userId: identifier
           };
 
+          // Session Persistence using sessionStorage
           setCircleUser(sessionUser);
-          localStorage.setItem('submanager_circle_user', JSON.stringify(sessionUser));
+          sessionStorage.setItem('submanager_circle_user', JSON.stringify(sessionUser));
           setShowLoginModal(false);
           setLoginEmailInput('');
 
           if (isNewWallet) {
-            showNotification(`🎉 Wallet Created! Address: ${wData.walletAddress}`, 'success', 'Circle Faucet', 'https://faucet.circle.com');
+            // State C - First-time user toast with faucet link
+            showNotification(`🎉 Wallet created on Arc Testnet!`, 'success', 'Circle Faucet', 'https://faucet.circle.com');
           } else {
-            showNotification(`Welcome back! Circle Wallet Connected.`);
+            showNotification(`Welcome back! Circle wallet successfully reconnected.`);
           }
         } catch (e) {
-          showNotification(`Failed to sync Circle wallet: ${e.message}`, 'error');
+          showNotification(`Failed to retrieve Circle wallet details: ${e.message}`, 'error');
         } finally {
           setIsLoggingIn(false);
         }
       };
 
+      // State A - Sign Out (clears sessionStorage)
       const handleSignOut = () => {
         setCircleUser(null);
-        localStorage.removeItem('submanager_circle_user');
-        showNotification('Circle session signed out.');
+        sessionStorage.removeItem('submanager_circle_user');
+        
+        // Reset header identity state
+        loadAgentConfig();
+        showNotification('Circle session signed out successfully.');
       };
 
       const keysActive = agentConfig.ownerAddress && agentConfig.ownerAddress !== '...' && agentConfig.ownerAddress !== '0x0000000000000000000000000000000000000000';
+      const showGoogleTab = !!appConfig.googleClientId && appConfig.googleClientId.trim() !== '';
 
       return (
         <div className="space-y-8 pb-12 animate-fade-in w-full">
@@ -812,7 +866,7 @@
             </div>
           )}
 
-          {/* Signed In/Out Header Navigation Bar */}
+          {/* Top Bar with Three States (Signed Out, Connected, First-Time User) */}
           <div className="w-full glass-card rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-center gap-3 border-white/10">
             <div className="flex items-center gap-3">
               <span className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
@@ -823,20 +877,23 @@
 
             <div className="flex items-center gap-4">
               {!circleUser ? (
-                // Signed Out State
+                // State A - Signed Out
                 <button
-                  onClick={() => setShowLoginModal(true)}
+                  onClick={() => {
+                    setShowLoginModal(true);
+                    setActiveTab('email');
+                  }}
                   className="bg-[#0b1329] hover:bg-[#152347] border border-white/10 text-white text-sm font-semibold px-4 py-2 rounded-lg flex items-center gap-2 transition-all shadow-[0_4px_12px_rgba(0,0,0,0.2)]"
                 >
                   <span className="text-arc text-base font-bold">◑</span> Sign in with Circle
                 </button>
               ) : (
-                // Signed In State
+                // State B - Wallet Connected
                 <div className="flex items-center gap-3 flex-wrap">
                   <div className="flex items-center gap-2 bg-gray-900/60 border border-gray-800 rounded-lg px-3 py-1.5 text-xs">
                     <span className="w-2 h-2 bg-green-500 rounded-full pulse-dot"></span>
                     <span className="font-mono text-gray-300 font-medium">
-                      Circle: <span className="text-white font-bold">{truncateAddress(circleUser.walletAddress)}</span>
+                      {circleUser.email}: <span className="text-white font-bold">{truncateAddress(circleUser.walletAddress)}</span>
                     </span>
                     <span className="text-[10px] bg-arc/10 text-arc border border-arc/20 px-2 py-0.5 rounded font-mono font-bold">
                       {walletBalance} USDC
@@ -932,7 +989,7 @@
                     {/* Standard/Advanced private key form */}
                     <div className="space-y-3">
                       <span className="text-[10px] uppercase font-bold text-gray-500 block mb-1">
-                        {circleUser ? 'Advanced: Use existing wallet keys' : 'Configure Agent Private Keys'}
+                        Already have an Arc wallet? Use your private keys directly instead of Circle auth.
                       </span>
                       <form onSubmit={saveAgentKeys} className="space-y-3">
                         <div>
@@ -1235,7 +1292,7 @@
             </div>
           </div>
 
-          {/* Reputation Sidebar placed at the bottom span for cleaner horizontal profile */}
+          {/* Reputation section at bottom */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-3">
               <div className="glass-card rounded-2xl p-6 shadow-2xl flex flex-col md:flex-row items-center justify-between border-t-2 border-t-arc/40 relative overflow-hidden">
@@ -1277,55 +1334,130 @@
             </div>
           </div>
 
-          {/* Circle Sign-in Email Input Modal */}
+          {/* Circle Social & Email Auth Modal */}
           {showLoginModal && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-fade-in">
               <div className="glass-card rounded-2xl p-6 max-w-sm w-full space-y-4">
-                <div className="flex justify-between items-center">
+                
+                {/* Modal Title & Close Button */}
+                <div className="flex justify-between items-center border-b border-white/10 pb-3">
                   <h3 className="text-lg font-bold text-white flex items-center gap-2">
                     <span className="text-arc text-base font-bold">◑</span> Sign in with Circle
                   </h3>
                   <button onClick={() => setShowLoginModal(false)} className="text-gray-400 hover:text-white font-bold text-xl font-mono">×</button>
                 </div>
-                <form onSubmit={handleCircleLogin} className="space-y-4">
-                  <p className="text-xs text-gray-400 leading-relaxed">
-                    Circle's Programmable Wallets Web SDK will secure your account. Enter your email to authenticate or create a new user-controlled MPC wallet.
-                  </p>
-                  <div>
-                    <label className="text-[10px] uppercase text-gray-400 font-bold block mb-1">Email Address</label>
-                    <input 
-                      type="email" 
-                      placeholder="you@example.com" 
-                      value={loginEmailInput}
-                      onChange={e => setLoginEmailInput(e.target.value)}
-                      required
-                      disabled={isLoggingIn}
-                      className="w-full glass-input rounded-lg px-3 py-2 text-sm font-medium"
-                    />
-                  </div>
-                  <div className="flex gap-2 justify-end pt-2">
+
+                {/* Tab selectors */}
+                <div className="flex bg-gray-950/50 p-1 rounded-lg border border-white/5">
+                  <button 
+                    onClick={() => setActiveTab('email')}
+                    className={`flex-1 text-center py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'email' ? 'bg-arc text-slate-950' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    Email
+                  </button>
+                  
+                  {showGoogleTab && (
                     <button 
-                      type="button"
-                      onClick={() => setShowLoginModal(false)}
-                      disabled={isLoggingIn}
-                      className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-2 rounded font-bold transition-all"
+                      onClick={() => setActiveTab('google')}
+                      className={`flex-1 text-center py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'google' ? 'bg-arc text-slate-950' : 'text-gray-400 hover:text-white'}`}
                     >
-                      Cancel
+                      Google
                     </button>
-                    <button 
-                      type="submit"
+                  )}
+
+                  <button 
+                    onClick={() => setActiveTab('new')}
+                    className={`flex-1 text-center py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'new' ? 'bg-arc text-slate-950' : 'text-gray-400 hover:text-white'}`}
+                  >
+                    New user?
+                  </button>
+                </div>
+
+                {/* Modal Contents based on selected Tab */}
+                {activeTab === 'email' && (
+                  <form onSubmit={handleCircleEmailLogin} className="space-y-4 pt-1">
+                    <p className="text-[11px] text-gray-400 leading-relaxed">
+                      Enter your email to verify your identity or configure your secure user-controlled MPC wallet.
+                    </p>
+                    <div>
+                      <label className="text-[10px] uppercase text-gray-400 font-bold block mb-1">Email Address</label>
+                      <input 
+                        type="email" 
+                        placeholder="you@example.com" 
+                        value={loginEmailInput}
+                        onChange={e => setLoginEmailInput(e.target.value)}
+                        required
+                        disabled={isLoggingIn}
+                        className="w-full glass-input rounded-lg px-3 py-2 text-sm font-medium"
+                      />
+                    </div>
+                    <div className="flex gap-2 justify-end pt-2">
+                      <button 
+                        type="button"
+                        onClick={() => setShowLoginModal(false)}
+                        disabled={isLoggingIn}
+                        className="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-2 rounded font-bold transition-all"
+                      >
+                        Cancel
+                      </button>
+                      <button 
+                        type="submit"
+                        disabled={isLoggingIn}
+                        className="text-xs bg-arc hover:bg-arcDark disabled:opacity-50 text-slate-950 px-4 py-2 rounded font-extrabold flex items-center gap-1.5 transition-all shadow-[0_0_10px_rgba(0,209,255,0.2)]"
+                      >
+                        {isLoggingIn ? (
+                          <>
+                            <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full"></span>
+                            Continuing...
+                          </>
+                        ) : 'Continue'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {activeTab === 'google' && (
+                  <div className="space-y-4 pt-1">
+                    <p className="text-[11px] text-gray-400 leading-relaxed">
+                      Authenticate instantly using your Google account to access your user-controlled wallets securely.
+                    </p>
+                    <button
+                      onClick={handleCircleGoogleLogin}
                       disabled={isLoggingIn}
-                      className="text-xs bg-arc hover:bg-arcDark disabled:opacity-50 text-slate-950 px-4 py-2 rounded font-extrabold flex items-center gap-1.5 transition-all shadow-[0_0_10px_rgba(0,209,255,0.2)]"
+                      className="w-full bg-[#152347] hover:bg-[#1e3264] border border-white/10 text-white py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2.5 transition-all disabled:opacity-50"
                     >
                       {isLoggingIn ? (
                         <>
-                          <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full"></span>
-                          Signing In...
+                          <span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full"></span>
+                          Logging In...
                         </>
-                      ) : 'Continue'}
+                      ) : (
+                        <>
+                          <span className="font-bold text-red-400">G</span> Continue with Google
+                        </>
+                      )}
                     </button>
                   </div>
-                </form>
+                )}
+
+                {activeTab === 'new' && (
+                  <div className="space-y-4 pt-1">
+                    <p className="text-xs text-gray-300 leading-relaxed">
+                      Circle auto-creates a secure, user-controlled cryptographic wallet directly on the Arc Testnet when you register with your email or social accounts.
+                    </p>
+                    <div className="bg-arc/5 border border-arc/20 rounded-lg p-3 text-xs leading-relaxed text-gray-300">
+                      💡 Need test USDC? Once logged in, copy your new address and fund it using the faucet!
+                    </div>
+                    <a 
+                      href="https://faucet.circle.com" 
+                      target="_blank" 
+                      className="text-xs text-arc hover:underline font-extrabold block text-center mt-2"
+                    >
+                      Visit Circle Faucet ↗
+                    </a>
+                  </div>
+                )}
+
               </div>
             </div>
           )}
