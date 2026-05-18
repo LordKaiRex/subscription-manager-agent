@@ -1,6 +1,5 @@
+/// <reference types="node" />
 import { keccak256, stringToHex } from 'viem';
-import * as fs from 'fs';
-import * as path from 'path';
 import { 
   publicClient, 
   ownerWalletClient, 
@@ -16,63 +15,31 @@ import {
 } from './config.js';
 import { cancelSubscription } from './subscriptions.js';
 
-const jobsPath = path.resolve(process.cwd(), 'data/jobs.json');
-
-function ensureDataDir() {
-  const dir = path.dirname(jobsPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
 export function loadJobs() {
-  ensureDataDir();
-  if (!fs.existsSync(jobsPath)) {
-    return { activeJobs: [], inProgressJobs: [] };
-  }
-  try {
-    const raw = fs.readFileSync(jobsPath, 'utf8');
-    return JSON.parse(raw);
-  } catch (e) {
-    console.error('Error loading jobs.json:', e);
-    return { activeJobs: [], inProgressJobs: [] };
-  }
+  return {
+    activeJobs: Array.from(activeJobs.entries()).map(([jobId, meta]) => ({
+      jobId: jobId.toString(),
+      meta: {
+        ...meta,
+        expiredAt: meta.expiredAt ? meta.expiredAt.toString() : undefined
+      }
+    })),
+    inProgressJobs: Array.from(inProgressJobs.entries()).map(([subName, jobId]) => ({
+      subName,
+      jobId: jobId.toString()
+    }))
+  };
 }
 
 export function saveJobs() {
-  ensureDataDir();
-  const serializedActive = Array.from(activeJobs.entries()).map(([jobId, meta]) => ({
-    jobId: jobId.toString(),
-    meta: {
-      ...meta,
-      expiredAt: meta.expiredAt ? meta.expiredAt.toString() : undefined
-    }
-  }));
-  const serializedInProgress = Array.from(inProgressJobs.entries()).map(([subName, jobId]) => ({
-    subName,
-    jobId: jobId.toString()
-  }));
-  fs.writeFileSync(jobsPath, JSON.stringify({
-    activeJobs: serializedActive,
-    inProgressJobs: serializedInProgress
-  }, null, 2), 'utf8');
+  // In-memory maps don't need saving
 }
 
-// Load persisted state on startup
-const initialJobs = loadJobs();
-export const activeJobs = new Map<bigint, any>(
-  initialJobs.activeJobs.map((item: any) => [
-    BigInt(item.jobId),
-    {
-      ...item.meta,
-      expiredAt: item.meta.expiredAt ? BigInt(item.meta.expiredAt) : undefined
-    }
-  ])
-);
+// Initialize empty maps
 
-export const inProgressJobs = new Map<string, bigint>(
-  initialJobs.inProgressJobs.map((item: any) => [item.subName, BigInt(item.jobId)])
-);
+export const activeJobs = new Map<bigint, any>();
+
+export const inProgressJobs = new Map<string, bigint>();
 
 export function watchJobs() {
   if (!validatorAccount) {

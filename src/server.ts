@@ -375,34 +375,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         return;
       }
 
-      const envPath = resolve(process.cwd(), '.env');
-      let envContent = '';
-      if (existsSync(envPath)) {
-        envContent = readFileSync(envPath, 'utf8');
-      }
-
-      const lines = envContent.split(/\r?\n/);
-      let ownerUpdated = false;
-      let validatorUpdated = false;
-
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].startsWith('OWNER_PRIVATE_KEY=')) {
-          lines[i] = `OWNER_PRIVATE_KEY=${ownerKey}`;
-          ownerUpdated = true;
-        }
-        if (lines[i].startsWith('VALIDATOR_PRIVATE_KEY=')) {
-          lines[i] = `VALIDATOR_PRIVATE_KEY=${validatorKey}`;
-          validatorUpdated = true;
-        }
-      }
-
-      if (!ownerUpdated) lines.push(`OWNER_PRIVATE_KEY=${ownerKey}`);
-      if (!validatorUpdated) lines.push(`VALIDATOR_PRIVATE_KEY=${validatorKey}`);
-
-      writeFileSync(envPath, lines.join('\n'), 'utf8');
-      console.log('✅ Keys successfully updated inside .env file');
-
       process.env.OWNER_PRIVATE_KEY = ownerKey;
+      process.env.VALIDATOR_PRIVATE_KEY = validatorKey;
+      console.log('✅ Keys successfully updated in memory');
       process.env.VALIDATOR_PRIVATE_KEY = validatorKey;
       reinitializeConfig();
       console.log('✅ Viem Clients successfully reinitialized in memory');

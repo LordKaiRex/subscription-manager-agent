@@ -1,5 +1,4 @@
-import * as fs from 'fs';
-import * as path from 'path';
+/// <reference types="node" />
 import { 
   publicClient, 
   validatorWalletClient, 
@@ -8,33 +7,22 @@ import {
   identityRegistryAbi 
 } from './config.js';
 
-const agentJsonPath = path.resolve(process.cwd(), 'data/agent.json');
-
-function ensureDataDir() {
-  const dir = path.dirname(agentJsonPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
+let cachedAgentId: bigint | null = null;
 
 /**
  * Initializes and registers the Agent on the on-chain IdentityRegistry if not already registered.
- * Caches the resolved agentId inside data/agent.json.
+ * Uses environment variable AGENT_ID or memory cache.
  */
 export async function initializeAgent(): Promise<bigint> {
-  ensureDataDir();
+  if (cachedAgentId) {
+    return cachedAgentId;
+  }
 
-  if (fs.existsSync(agentJsonPath)) {
-    try {
-      const raw = fs.readFileSync(agentJsonPath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.agentId) {
-        console.log(`🤖 Cached Agent Identity loaded. Agent ID: ${parsed.agentId}`);
-        return BigInt(parsed.agentId);
-      }
-    } catch (e) {
-      console.error('⚠️ Failed to read data/agent.json, re-registering...', e);
-    }
+  // Check if we can fallback to env var
+  if (process.env.AGENT_ID) {
+    cachedAgentId = BigInt(process.env.AGENT_ID);
+    console.log(`🤖 Agent Identity loaded from Environment Variable. Agent ID: ${cachedAgentId.toString()}`);
+    return cachedAgentId;
   }
 
   // If not cached, register on-chain
@@ -77,16 +65,7 @@ export async function initializeAgent(): Promise<bigint> {
     }
 
     console.log(`✅ On-chain registration successful! Resolved Agent ID: ${agentId.toString()}`);
-    
-    try {
-      fs.writeFileSync(agentJsonPath, JSON.stringify({
-        agentId: agentId.toString(),
-        registeredAt: new Date().toISOString(),
-        transactionHash: txHash
-      }, null, 2), 'utf8');
-    } catch (e) {
-      console.warn('⚠️ Could not save agent identity to disk (read-only filesystem on Vercel)');
-    }
+    cachedAgentId = agentId;
 
     return agentId;
   } catch (error) {
