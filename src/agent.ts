@@ -78,11 +78,15 @@ export async function initializeAgent(): Promise<bigint> {
 
     console.log(`✅ On-chain registration successful! Resolved Agent ID: ${agentId.toString()}`);
     
-    fs.writeFileSync(agentJsonPath, JSON.stringify({
-      agentId: agentId.toString(),
-      registeredAt: new Date().toISOString(),
-      transactionHash: txHash
-    }, null, 2), 'utf8');
+    try {
+      fs.writeFileSync(agentJsonPath, JSON.stringify({
+        agentId: agentId.toString(),
+        registeredAt: new Date().toISOString(),
+        transactionHash: txHash
+      }, null, 2), 'utf8');
+    } catch (e) {
+      console.warn('⚠️ Could not save agent identity to disk (read-only filesystem on Vercel)');
+    }
 
     return agentId;
   } catch (error) {

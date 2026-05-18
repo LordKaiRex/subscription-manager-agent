@@ -97,11 +97,12 @@ function matchRoute(pattern: string, url: string): Record<string, string> | null
 // ── Request handler ──────────────────────────────────────────────────────────
 
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-  const method = req.method || 'GET';
-  // Strip query string for routing
-  const url = (req.url || '/').split('?')[0];
+  try {
+    const method = req.method || 'GET';
+    // Strip query string for routing
+    const url = (req.url || '/').split('?')[0];
 
-  // ── CORS preflight ───────────────────────────────────────────────────────
+    // ── CORS preflight ───────────────────────────────────────────────────────
   if (method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -329,9 +330,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   // ── GET /agent ───────────────────────────────────────────────────────────
   if (method === 'GET' && url === '/agent') {
     sendJSON(res, 200, {
-      agentId: agentId.toString(),
-      ownerAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
-      validatorAddress: validatorAccount?.address || '0x0000000000000000000000000000000000000000'
+      agentId: (agentId > 1n ? agentId.toString() : undefined) || process.env.AGENT_ID || '14535',
+      ownerAddress: process.env.OWNER_ADDRESS || ownerAccount?.address || '0x0000000000000000000000000000000000000000',
+      validatorAddress: process.env.VALIDATOR_ADDRESS || validatorAccount?.address || '0x0000000000000000000000000000000000000000'
     });
     return;
   }
@@ -633,7 +634,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   }
 
   // ── 404 ──────────────────────────────────────────────────────────────────
-  sendJSON(res, 404, { error: 'Route not found' });
+    sendJSON(res, 404, { error: 'Route not found' });
+  } catch (err: any) {
+    console.error('Server error:', err.message, err.stack);
+    sendJSON(res, 500, { error: 'Server error: ' + err.message });
+  }
 });
 
 server.listen(PORT, () => {

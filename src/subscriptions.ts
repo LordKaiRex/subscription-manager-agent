@@ -20,55 +20,40 @@ function ensureDataDir() {
 }
 
 export function loadSubscriptions(): Subscription[] {
-  ensureDataDir();
-  if (!fs.existsSync(subscriptionsPath)) {
-    const defaultList: Subscription[] = [
-      {
-        id: 'sub-1',
-        name: 'Netflix',
-        clientAddress: '0x1234567890123456789012345678901234567890',
-        renewalDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000), // 2 days
-        amount: 15_990_000n, // $15.99
-        active: true
-      },
-      {
-        id: 'sub-2',
-        name: 'Spotify',
-        clientAddress: '0x1234567890123456789012345678901234567890',
-        renewalDate: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000), // 10 days
-        amount: 9_990_000n, // $9.99
-        active: true
-      },
-      {
-        id: 'sub-3',
-        name: 'ChatGPT Plus',
-        clientAddress: '0x1234567890123456789012345678901234567890',
-        renewalDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), // 5 days
-        amount: 20_000_000n, // $20.00
-        active: true
-      }
+  try {
+    ensureDataDir();
+    if (!fs.existsSync(subscriptionsPath)) {
+      throw new Error('File not found');
+    }
+    const raw = fs.readFileSync(subscriptionsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed.map((item: any) => ({
+      ...item,
+      renewalDate: new Date(item.renewalDate),
+      amount: BigInt(item.amount)
+    }));
+  } catch (e) {
+    // Return defaults if file doesn't exist or read fails
+    return [
+      { id: 'sub-1', name: 'Netflix', clientAddress: '0x1234567890123456789012345678901234567890', amount: 15_990_000n, renewalDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), active: true },
+      { id: 'sub-2', name: 'Spotify', clientAddress: '0x1234567890123456789012345678901234567890', amount: 9_990_000n, renewalDate: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000), active: true },
+      { id: 'sub-3', name: 'ChatGPT Plus', clientAddress: '0x1234567890123456789012345678901234567890', amount: 20_000_000n, renewalDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), active: true }
     ];
-    saveSubscriptions(defaultList);
-    return defaultList;
   }
-  
-  const raw = fs.readFileSync(subscriptionsPath, 'utf8');
-  const parsed = JSON.parse(raw);
-  return parsed.map((item: any) => ({
-    ...item,
-    renewalDate: new Date(item.renewalDate),
-    amount: BigInt(item.amount)
-  }));
 }
 
 export function saveSubscriptions(list: Subscription[]) {
-  ensureDataDir();
-  const serialized = list.map(item => ({
-    ...item,
-    renewalDate: item.renewalDate.toISOString(),
-    amount: item.amount.toString()
-  }));
-  fs.writeFileSync(subscriptionsPath, JSON.stringify(serialized, null, 2), 'utf8');
+  try {
+    ensureDataDir();
+    const serialized = list.map(item => ({
+      ...item,
+      renewalDate: item.renewalDate.toISOString(),
+      amount: item.amount.toString()
+    }));
+    fs.writeFileSync(subscriptionsPath, JSON.stringify(serialized, null, 2), 'utf8');
+  } catch (e) {
+    console.warn('⚠️ Could not save subscriptions to disk (read-only filesystem on Vercel)');
+  }
 }
 
 /**
