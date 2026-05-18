@@ -820,20 +820,23 @@
 
       const initCircleSDK = async (otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) => {
         try {
+          console.log('initCircleSDK called', { isSignIn, hasOtpToken: !!otpToken });
           const appIdRes = await fetch(`${API_URL}/auth/appid`);
-          const { appId } = await appIdRes.json();
-
-          if (!appId || appId === 'your-app-id-here' || appId.length < 10) {
-            showStepError('⚠️ Circle Console Setup Required. App ID is missing.');
+          const appIdData = await appIdRes.json();
+          console.log('appId received:', appIdData.appId);
+          if (!appIdData.appId || appIdData.appId === 'your-app-id-here' || appIdData.appId === 'undefined' || appIdData.appId.length < 10) {
+            showStepError('Circle App ID not configured on server. Check CIRCLE_APP_ID env var on Vercel.');
             return;
           }
+          const appId = appIdData.appId;
           setWizardAppId(appId);
+
+          console.log('Creating W3SSdk...');
+          console.log('W3SSdk type:', typeof W3SSdk);
+          console.log('window.W3SSdk type:', typeof window.W3SSdk);
 
           // Reset SDK singleton so fresh credentials are used
           window.W3SSdk.instance = null;
-
-          console.log('W3SSdk available:', typeof window.W3SSdk);
-          console.log('CircleW3s:', typeof window.CircleW3s);
 
           // Construct with correct shape — loginConfigs carries OTP tokens into the postMessage
           const sdk = new window.W3SSdk(
@@ -907,6 +910,9 @@
               }
             }
           );
+
+          console.log('SDK created:', sdk);
+          console.log('SDK methods:', Object.keys(sdk));
 
           // Wait 500ms to ensure the container is fully painted before verifying
           setTimeout(() => {
@@ -1123,7 +1129,7 @@
                       </div>
                     )}
                     <p className="text-[10px] text-gray-500 text-center leading-relaxed font-medium">
-                      🔒 Keys are stored locally in your .env file and never sent externally
+                      🔒 Keys are encrypted and stored securely. Never shared externally.
                     </p>
                   </div>
                 )}
