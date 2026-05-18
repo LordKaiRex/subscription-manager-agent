@@ -13,6 +13,11 @@ import { initializeAgent } from '../src/agent.js';
 import { loadJobs, executeCancellationJob } from '../src/jobs.js';
 import { checkAndProcessRenewals } from '../src/checker.js';
 
+// Helper to safely serialize BigInt values in JSON responses
+function safeJSON(data: unknown) {
+  return JSON.parse(JSON.stringify(data, (_, v) => typeof v === 'bigint' ? v.toString() : v));
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -26,40 +31,47 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = parsedUrl.pathname;
+  
+  // Vercel serverless rewrites store the original path in this header
+  const forwardedPath = req.headers['x-vercel-forwarded-path'] as string || '';
+  const resolvedPath = forwardedPath ? forwardedPath.split('?')[0] : pathname;
+  
   const method = req.method || 'GET';
   const body = req.body || {};
 
+  console.log('Request URL:', req.url, 'Resolved Path:', resolvedPath, 'Method:', method);
+
   try {
     // ── GET /auth/appid ──────────────────────────────────────────────────────
-    if (pathname === '/auth/appid' && method === 'GET') {
-      console.log('CIRCLE_APP_ID requested:', process.env.CIRCLE_APP_ID);
-      res.status(200).json({
+    if ((resolvedPath === '/auth/appid' || resolvedPath.includes('/auth/appid')) && method === 'GET') {
+      console.log('CIRCLE_APP_ID value:', process.env.CIRCLE_APP_ID);
+      res.status(200).json(safeJSON({
         appId: process.env.CIRCLE_APP_ID || '',
         googleClientId: process.env.CIRCLE_GOOGLE_CLIENT_ID || ''
-      });
+      }));
       return;
     }
 
     // ── GET /auth/config ─────────────────────────────────────────────────────
-    if (pathname === '/auth/config' && method === 'GET') {
-      res.status(200).json({
+    if ((resolvedPath === '/auth/config' || resolvedPath.includes('/auth/config')) && method === 'GET') {
+      res.status(200).json(safeJSON({
         smtpConfigured: process.env.SMTP_CONFIGURED === 'true',
         appId: process.env.CIRCLE_APP_ID || ''
-      });
+      }));
       return;
     }
 
     // ── POST /auth/init ──────────────────────────────────────────────────────
-    if (pathname === '/auth/init' && method === 'POST') {
+    if ((resolvedPath === '/auth/init' || resolvedPath.includes('/auth/init')) && method === 'POST') {
       const { userId, deviceId } = body;
       console.log('Auth init called with:', { userId, deviceId });
 
       if (!userId || !deviceId) {
-        res.status(400).json({ error: 'Missing userId or deviceId' });
+        res.status(400).json(safeJSON({ error: 'Missing userId or deviceId' }));
         return;
       }
       if (userId.length > 50) {
-        res.status(400).json({ error: 'Email must be under 50 characters' });
+        res.status(400).json(safeJSON({ error: 'Email must be under 50 characters' }));
         return;
       }
 
@@ -75,7 +87,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const createData: any = await createRes.json();
       console.log('Create user response:', createData);
       if (!createRes.ok && createData.code !== 155101) {
-        res.status(400).json({ error: createData.message });
+        res.status(400).json(safeJSON({ error: createData.message }));
         return;
       }
 
@@ -97,21 +109,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const tokenData: any = await tokenRes.json();
       console.log('Token response:', tokenData);
       if (!tokenRes.ok) {
-        res.status(400).json({ error: tokenData.message });
+        res.status(400).json(safeJSON({ error: tokenData.message }));
         return;
       }
 
-      res.status(200).json(tokenData.data);
+      res.status(200).json(safeJSON(tokenData.data));
       return;
     }
 
     // ── POST /auth/signin ────────────────────────────────────────────────────
-    if (pathname === '/auth/signin' && method === 'POST') {
+    if ((resolvedPath === '/auth/signin' || resolvedPath.includes('/auth/signin')) && method === 'POST') {
       const { userId, deviceId } = body;
       console.log('Auth signin called with:', { userId, deviceId });
 
       if (!userId || !deviceId) {
-        res.status(400).json({ error: 'Missing userId or deviceId' });
+        res.status(400).json(safeJSON({ error: 'Missing userId or deviceId' }));
         return;
       }
 
@@ -132,19 +144,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const tokenData: any = await tokenRes.json();
       console.log('Token response:', tokenData);
       if (!tokenRes.ok) {
-        res.status(400).json({ error: tokenData.message });
+        res.status(400).json(safeJSON({ error: tokenData.message }));
         return;
       }
 
-      res.status(200).json(tokenData.data);
+      res.status(200).json(safeJSON(tokenData.data));
       return;
     }
 
     // ── POST /auth/initialize ────────────────────────────────────────────────
-    if (pathname === '/auth/initialize' && method === 'POST') {
+    if ((resolvedPath === '/auth/initialize' || resolvedPath.includes('/auth/initialize')) && method === 'POST') {
       const { userToken } = body;
       if (!userToken) {
-        res.status(400).json({ error: 'Missing userToken' });
+        res.status(400).json(safeJSON({ error: 'Missing userToken' }));
         return;
       }
 
@@ -164,19 +176,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const initData: any = await initRes.json();
       console.log('Initialize response:', initData);
       if (!initRes.ok) {
-        res.status(400).json({ error: initData.message });
+        res.status(400).json(safeJSON({ error: initData.message }));
         return;
       }
 
-      res.status(200).json({ challengeId: initData.data?.challengeId });
+      res.status(200).json(safeJSON({ challengeId: initData.data?.challengeId }));
       return;
     }
 
     // ── POST /auth/wallets ───────────────────────────────────────────────────
-    if (pathname === '/auth/wallets' && method === 'POST') {
+    if ((resolvedPath === '/auth/wallets' || resolvedPath.includes('/auth/wallets')) && method === 'POST') {
       const { userToken } = body;
       if (!userToken) {
-        res.status(400).json({ error: 'Missing userToken' });
+        res.status(400).json(safeJSON({ error: 'Missing userToken' }));
         return;
       }
 
@@ -191,51 +203,51 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const walletsData: any = await walletsRes.json();
       console.log('Wallets response:', walletsData);
       if (!walletsRes.ok) {
-        res.status(400).json({ error: walletsData.message });
+        res.status(400).json(safeJSON({ error: walletsData.message }));
         return;
       }
 
       const wallets = walletsData.data?.wallets || [];
-      res.status(200).json({ walletAddress: wallets[0]?.address || null });
+      res.status(200).json(safeJSON({ walletAddress: wallets[0]?.address || null }));
       return;
     }
 
     // ── GET /agent ───────────────────────────────────────────────────────────
-    if (pathname === '/agent' && method === 'GET') {
+    if ((resolvedPath === '/agent' || resolvedPath.includes('/agent')) && method === 'GET') {
       let agentId = 14535n;
       try {
         const id = await initializeAgent();
         if (id > 1n) agentId = id;
       } catch (e) {}
 
-      res.status(200).json({
+      res.status(200).json(safeJSON({
         agentId: (agentId > 1n ? agentId.toString() : undefined) || process.env.AGENT_ID || '14535',
         ownerAddress: process.env.OWNER_ADDRESS || ownerAccount?.address || '0x0000000000000000000000000000000000000000',
         validatorAddress: process.env.VALIDATOR_ADDRESS || validatorAccount?.address || '0x0000000000000000000000000000000000000000'
-      });
+      }));
       return;
     }
 
     // ── GET /subscriptions ───────────────────────────────────────────────────
-    if (pathname === '/subscriptions' && method === 'GET') {
+    if ((resolvedPath === '/subscriptions' || resolvedPath.includes('/subscriptions')) && method === 'GET' && !resolvedPath.endsWith('/cancel')) {
       const list = loadSubscriptions();
-      res.status(200).json(list);
+      res.status(200).json(safeJSON(list));
       return;
     }
 
     // ── POST /subscriptions ──────────────────────────────────────────────────
-    if (pathname === '/subscriptions' && method === 'POST') {
+    if ((resolvedPath === '/subscriptions' || resolvedPath.includes('/subscriptions')) && method === 'POST' && !resolvedPath.endsWith('/cancel')) {
       const { name, amount, cost, costUSDC, renewalDate } = body;
       const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
 
       if (!name || rawCost === undefined || !renewalDate) {
-        res.status(400).json({ error: 'Missing name, cost/amount, or renewalDate' });
+        res.status(400).json(safeJSON({ error: 'Missing name, cost/amount, or renewalDate' }));
         return;
       }
 
       const numericCost = parseFloat(rawCost);
       if (isNaN(numericCost) || numericCost < 0) {
-        res.status(400).json({ error: 'Cost must be a positive number' });
+        res.status(400).json(safeJSON({ error: 'Cost must be a positive number' }));
         return;
       }
 
@@ -262,44 +274,44 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       saveSubscriptions(list);
-      res.status(200).json({ success: true, subscriptions: list });
+      res.status(200).json(safeJSON({ success: true, subscriptions: list }));
       return;
     }
 
     // ── DELETE /subscriptions/:name ──────────────────────────────────────────
-    if (pathname.startsWith('/subscriptions/') && method === 'DELETE') {
-      const parts = pathname.split('/');
+    if (resolvedPath.startsWith('/subscriptions/') && method === 'DELETE') {
+      const parts = resolvedPath.split('/');
       const targetName = decodeURIComponent(parts[2]);
       const list = loadSubscriptions();
       const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
 
       if (!sub) {
-        res.status(404).json({ error: `Subscription '${targetName}' not found` });
+        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
         return;
       }
 
       sub.active = false;
       saveSubscriptions(list);
-      res.status(200).json({
+      res.status(200).json(safeJSON({
         message: `Subscription '${targetName}' deactivated.`,
         subscription: sub
-      });
+      }));
       return;
     }
 
     // ── POST /subscriptions/:name/cancel ────────────────────────────────────
-    if (pathname.startsWith('/subscriptions/') && pathname.endsWith('/cancel') && method === 'POST') {
-      const parts = pathname.split('/');
+    if (resolvedPath.startsWith('/subscriptions/') && resolvedPath.endsWith('/cancel') && method === 'POST') {
+      const parts = resolvedPath.split('/');
       const targetName = decodeURIComponent(parts[2]);
       const list = loadSubscriptions();
       const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
 
       if (!sub) {
-        res.status(404).json({ error: `Subscription '${targetName}' not found` });
+        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
         return;
       }
       if (!sub.active) {
-        res.status(400).json({ error: `Subscription '${targetName}' is already inactive/cancelled.` });
+        res.status(400).json(safeJSON({ error: `Subscription '${targetName}' is already inactive/cancelled.` }));
         return;
       }
 
@@ -317,15 +329,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .then(() => console.log(`✅ Completed async cancellation job for ${targetName}`))
         .catch(err => console.error(`❌ Async cancellation job failed for ${targetName}:`, err));
 
-      res.status(200).json({
+      res.status(200).json(safeJSON({
         message: `ERC-8183 cancellation job successfully triggered for '${targetName}'.`,
         status: 'cancellation_triggered'
-      });
+      }));
       return;
     }
 
     // ── POST /trigger ────────────────────────────────────────────────────────
-    if (pathname === '/trigger' && method === 'POST') {
+    if ((resolvedPath === '/trigger' || resolvedPath.includes('/trigger')) && method === 'POST') {
       console.log('⚡ Manual renewal check triggered via API.');
       let agentId = 14535n;
       try {
@@ -334,20 +346,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       } catch (e) {}
 
       await checkAndProcessRenewals(agentId);
-      res.status(200).json({ message: 'Renewal check executed successfully.', status: 'triggered' });
+      res.status(200).json(safeJSON({ message: 'Renewal check executed successfully.', status: 'triggered' }));
       return;
     }
 
     // ── POST /setup-keys ─────────────────────────────────────────────────────
-    if (pathname === '/setup-keys' && method === 'POST') {
+    if ((resolvedPath === '/setup-keys' || resolvedPath.includes('/setup-keys')) && method === 'POST') {
       const { ownerKey, validatorKey } = body;
       const hexRegex = /^0x[a-fA-F0-9]{64}$/;
       if (!ownerKey || !hexRegex.test(ownerKey)) {
-        res.status(400).json({ error: 'Owner Key must be a valid 0x-prefixed 64-character hex string' });
+        res.status(400).json(safeJSON({ error: 'Owner Key must be a valid 0x-prefixed 64-character hex string' }));
         return;
       }
       if (!validatorKey || !hexRegex.test(validatorKey)) {
-        res.status(400).json({ error: 'Validator Key must be a valid 0x-prefixed 64-character hex string' });
+        res.status(400).json(safeJSON({ error: 'Validator Key must be a valid 0x-prefixed 64-character hex string' }));
         return;
       }
 
@@ -366,26 +378,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         console.warn('⚠️ Hot-reloaded clients, but Identity check returned warning/failure:', e.message);
       }
 
-      res.status(200).json({
+      res.status(200).json(safeJSON({
         success: true,
         message: 'Keys successfully saved and activated in memory!',
         agentId: agentId.toString(),
         ownerAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
         validatorAddress: validatorAccount?.address || '0x0000000000000000000000000000000000000000'
-      });
+      }));
       return;
     }
 
     // ── GET /jobs ────────────────────────────────────────────────────────────
-    if (pathname === '/jobs' && method === 'GET') {
+    if ((resolvedPath === '/jobs' || resolvedPath.includes('/jobs')) && method === 'GET') {
       const data = loadJobs();
-      res.status(200).json(data);
+      res.status(200).json(safeJSON(data));
       return;
     }
 
-    res.status(404).json({ error: 'Route not found: ' + pathname });
+    res.status(404).json(safeJSON({ error: 'Route not found: ' + resolvedPath }));
   } catch (err: any) {
     console.error('Handler error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json(safeJSON({ error: err.message }));
   }
 }
