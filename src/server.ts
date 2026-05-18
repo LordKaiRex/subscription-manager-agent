@@ -1,25 +1,18 @@
-import express from 'express';
-import cors from 'cors';
-import * as fs from 'fs';
-import * as path from 'path';
-import { createHash, randomUUID } from 'crypto';
-import { loadSubscriptions, saveSubscriptions, cancelSubscription, Subscription } from './subscriptions.js';
+import { setDefaultResultOrder } from 'node:dns';
+setDefaultResultOrder('ipv4first');
+
+import { createServer, IncomingMessage, ServerResponse } from 'node:http';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+import { loadSubscriptions, saveSubscriptions, Subscription } from './subscriptions.js';
 import { executeCancellationJob, loadJobs } from './jobs.js';
 import { checkAndProcessRenewals } from './checker.js';
 import { initializeAgent } from './agent.js';
 import { ownerAccount, validatorAccount, reinitializeConfig } from './config.js';
-import { getOrCreateUser, getUserToken, initializeWallet, getUserWallets } from './auth.js';
 
-const app = express();
 const PORT = 3001;
-
-// Override global Express JSON serialization to handle BigInts cleanly
-app.set('json replacer', (key: string, value: unknown) =>
-  typeof value === 'bigint' ? value.toString() : value
-);
-
-app.use(cors());
-app.use(express.json());
 
 let agentId = 1n;
 
@@ -27,482 +20,624 @@ let agentId = 1n;
 (async () => {
   try {
     agentId = await initializeAgent();
-    console.log(`🤖 Express server loaded with Agent ID: ${agentId.toString()}`);
+    console.log(`🤖 Server loaded. Agent ID: ${agentId.toString()}`);
   } catch (err) {
-    console.error("❌ Failed to initialize agent in server:", err);
+    console.error('❌ Failed to initialize agent in server:', err);
   }
 })();
 
-// Circle API Helper
-async function callCircleAPI(method: string, path: string, body?: any, userToken?: string) {
-  const apiKey = process.env.CIRCLE_API_KEY;
-  if (!apiKey || apiKey === 'YOUR_CIRCLE_API_KEY_HERE') {
-    throw new Error('Circle API Key is not configured in .env');
-  }
+console.log('✅ Circle auth ready');
 
-  const headers: any = {
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function sendJSON(res: ServerResponse, status: number, data: unknown) {
+  const body = JSON.stringify(data, (_, v) =>
+    typeof v === 'bigint' ? v.toString() : v
+  );
+  res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${apiKey}`
-  };
-  if (userToken) {
-    headers['X-User-Token'] = userToken;
-  }
-
-  const url = `https://api.circle.com${path}`;
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
   });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error(`Circle API Error [${method} ${path}]:`, errText);
-    throw new Error(`Circle API returned status ${response.status}: ${errText}`);
-  }
-
-  return response.json();
+  res.end(body);
 }
 
-// POST /auth/init - takes { userId } (email), creates/fetches user, returns session tokens + wallet challenge
-app.post('/auth/init', async (req, res) => {
-  try {
-    const rawUserId = req.body.userId || req.body.userEmail;
-    if (!rawUserId) {
-      res.status(400).json({ error: 'Missing userId or userEmail' });
-      return;
-    }
+function sendFile(res: ServerResponse, filePath: string) {
+  if (existsSync(filePath)) {
+    const content = readFileSync(filePath);
+    const ext = filePath.split('.').pop() || '';
+    const types: Record<string, string> = {
+      html: 'text/html',
+      js: 'application/javascript',
+      css: 'text/css',
+      json: 'application/json',
+      png: 'image/png',
+      ico: 'image/x-icon',
+      svg: 'image/svg+xml'
+    };
+    res.writeHead(200, { 'Content-Type': types[ext] || 'text/plain' });
+    res.end(content);
+  } else {
+    res.writeHead(404);
+    res.end('Not found');
+  }
+}
 
-    const email = rawUserId.toLowerCase().trim();
-    const userId = createHash('sha256').update(email).digest('hex');
-
-    const apiKey = process.env.CIRCLE_API_KEY;
-    const appId = process.env.CIRCLE_APP_ID || '';
-
-    // Mock fallback when no real Circle API key is loaded
-    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('YOUR_')) {
-      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating auth/init for ${email}...`);
-      const mockChallengeId = `mock-challenge-id-${userId.substring(0, 8)}`;
-      res.json({
-        simulated: true,
-        userToken: `mock-user-token-${userId.substring(0, 10)}`,
-        encryptionKey: 'mock-encryption-key-for-submanager',
-        appId: appId || 'mock-app-id',
-        challengeId: mockChallengeId
-      });
-      return;
-    }
-
-    // Step 1: Create or fetch W3S user
-    try {
-      await getOrCreateUser(userId);
-      console.log(`👤 Circle User active: ${userId} (${email})`);
-    } catch (e: any) {
-      console.warn(`⚠️ User get/create check warning: ${e.message}`);
-    }
-
-    // Step 2: Get user session token & encryption key
-    const tokenRes = await getUserToken(userId);
-    const { userToken, encryptionKey } = tokenRes;
-
-    // Step 3: Check if they already have a wallet
-    let wallets = [];
-    try {
-      wallets = await getUserWallets(userToken);
-    } catch (e) {
-      console.warn('⚠️ Error fetching wallets during init:', e);
-    }
-
-    let challengeId = null;
-    if (wallets.length === 0) {
-      // Step 4: Initialize wallet challenge
-      console.log(`🔑 Initializing User-Controlled wallet creation for ${email}...`);
-      challengeId = await initializeWallet(userToken);
-    } else {
-      console.log(`💼 Existing wallet already connected for ${email}: ${wallets[0].address}`);
-    }
-
-    res.json({
-      userToken,
-      encryptionKey,
-      appId,
-      challengeId
+async function getBody(req: IncomingMessage): Promise<Record<string, any>> {
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (chunk: Buffer) => (raw += chunk));
+    req.on('end', () => {
+      try { resolve(JSON.parse(raw)); }
+      catch { resolve({}); }
     });
-  } catch (e: any) {
-    console.error('❌ /auth/init failed:', e);
-    res.status(500).json({ error: e.message });
+  });
+}
+
+/** Extract a named URL segment from a route pattern.
+ *  matchRoute('/subscriptions/:name/cancel', '/subscriptions/netflix/cancel')
+ *  → { name: 'netflix' }  or null if no match.
+ */
+function matchRoute(pattern: string, url: string): Record<string, string> | null {
+  const patternParts = pattern.split('/');
+  const urlParts = url.split('/');
+  if (patternParts.length !== urlParts.length) return null;
+  const params: Record<string, string> = {};
+  for (let i = 0; i < patternParts.length; i++) {
+    if (patternParts[i].startsWith(':')) {
+      params[patternParts[i].slice(1)] = decodeURIComponent(urlParts[i]);
+    } else if (patternParts[i] !== urlParts[i]) {
+      return null;
+    }
   }
-});
+  return params;
+}
 
-// POST /auth/wallets - takes { userToken }, returns user's ARC-TESTNET wallets
-app.post('/auth/wallets', async (req, res) => {
-  try {
-    const { userToken } = req.body;
-    if (!userToken) {
-      res.status(400).json({ error: 'Missing userToken' });
-      return;
-    }
+// ── Request handler ──────────────────────────────────────────────────────────
 
-    const apiKey = process.env.CIRCLE_API_KEY;
-    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('YOUR_')) {
-      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating auth/wallets...`);
-      res.json([{
-        id: 'mock-wallet-id',
-        address: '0x6e6B69D686E61Cc8b851C8e3721dF9C6Ef002DD0',
-        blockchain: 'ARC-TESTNET',
-        state: 'LIVE'
-      }]);
-      return;
-    }
+const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const method = req.method || 'GET';
+  // Strip query string for routing
+  const url = (req.url || '/').split('?')[0];
 
-    const wallets = await getUserWallets(userToken);
-    res.json(wallets);
-  } catch (e: any) {
-    console.error('❌ /auth/wallets failed:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// POST /auth/social - takes { provider: 'google' }, returns userToken, encryptionKey, appId
-app.post('/auth/social', async (req, res) => {
-  try {
-    const { provider } = req.body;
-    if (!provider) {
-      res.status(400).json({ error: 'Missing provider' });
-      return;
-    }
-
-    const apiKey = process.env.CIRCLE_API_KEY;
-    const appId = process.env.CIRCLE_APP_ID || '';
-    const socialUserId = `social_${provider}_default_user`;
-    const userId = createHash('sha256').update(socialUserId).digest('hex');
-
-    if (!apiKey || apiKey.trim() === '' || apiKey.startsWith('YOUR_')) {
-      console.log(`⚠️ CIRCLE_API_KEY not configured. Simulating auth/social for provider ${provider}...`);
-      res.json({
-        simulated: true,
-        userToken: `mock-social-token-${userId.substring(0, 10)}`,
-        encryptionKey: 'mock-encryption-key-for-social',
-        appId: appId || 'mock-app-id'
-      });
-      return;
-    }
-
-    // Create user and retrieve session token for social flow
-    try {
-      await getOrCreateUser(userId);
-    } catch (e: any) {
-      console.warn(`⚠️ Social user registration check warning: ${e.message}`);
-    }
-
-    const tokenData = await getUserToken(userId);
-    res.json({
-      userToken: tokenData.userToken,
-      encryptionKey: tokenData.encryptionKey,
-      appId
+  // ── CORS preflight ───────────────────────────────────────────────────────
+  if (method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
     });
-  } catch (e: any) {
-    console.error('❌ /auth/social failed:', e);
-    res.status(500).json({ error: e.message });
+    res.end();
+    return;
   }
-});
 
-// GET /auth/appid - returns { appId, googleClientId }
-app.get('/auth/appid', (req, res) => {
-  res.json({
-    appId: process.env.CIRCLE_APP_ID || '',
-    googleClientId: process.env.CIRCLE_GOOGLE_CLIENT_ID || ''
-  });
-});
-
-// GET /agent - returns agent metadata
-app.get('/agent', (req, res) => {
-  res.json({
-    agentId: agentId.toString(),
-    ownerAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
-    validatorAddress: validatorAccount?.address || '0x0000000000000000000000000000000000000000'
-  });
-});
-
-// GET /subscriptions - returns all subscriptions from the JSON store
-app.get('/subscriptions', (req, res) => {
-  try {
-    const list = loadSubscriptions();
-    res.json(list);
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /jobs - returns persisted jobs metadata (for history description stitching)
-app.get('/jobs', (req, res) => {
-  try {
-    const data = loadJobs();
-    res.json(data);
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// POST /setup-keys - hot-reloads private keys into .env and memory
-app.post('/setup-keys', async (req, res) => {
-  try {
-    const { ownerKey, validatorKey } = req.body;
-
-    // Validation: must be valid 0x-prefixed 64-char hex strings (length 66)
-    const hexRegex = /^0x[a-fA-F0-9]{64}$/;
-    if (!ownerKey || !hexRegex.test(ownerKey)) {
-      res.status(400).json({ error: 'Owner Key must be a valid 0x-prefixed 64-character hex string' });
-      return;
-    }
-    if (!validatorKey || !hexRegex.test(validatorKey)) {
-      res.status(400).json({ error: 'Validator Key must be a valid 0x-prefixed 64-character hex string' });
-      return;
-    }
-
-    // 1. Write back to .env preserving other config variables like WEBHOOK_URL
-    const envPath = path.resolve(process.cwd(), '.env');
-    let envContent = '';
-    if (fs.existsSync(envPath)) {
-      envContent = fs.readFileSync(envPath, 'utf8');
-    }
-
-    const lines = envContent.split(/\r?\n/);
-    let ownerUpdated = false;
-    let validatorUpdated = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith('OWNER_PRIVATE_KEY=')) {
-        lines[i] = `OWNER_PRIVATE_KEY=${ownerKey}`;
-        ownerUpdated = true;
-      }
-      if (lines[i].startsWith('VALIDATOR_PRIVATE_KEY=')) {
-        lines[i] = `VALIDATOR_PRIVATE_KEY=${validatorKey}`;
-        validatorUpdated = true;
-      }
-    }
-
-    if (!ownerUpdated) lines.push(`OWNER_PRIVATE_KEY=${ownerKey}`);
-    if (!validatorUpdated) lines.push(`VALIDATOR_PRIVATE_KEY=${validatorKey}`);
-
-    fs.writeFileSync(envPath, lines.join('\n'), 'utf8');
-    console.log('✅ Keys successfully updated inside .env file');
-
-    // 2. Refresh process.env and reinitialize config in memory
-    process.env.OWNER_PRIVATE_KEY = ownerKey;
-    process.env.VALIDATOR_PRIVATE_KEY = validatorKey;
-    reinitializeConfig();
-    console.log('✅ Viem Clients successfully reinitialized in memory');
-
-    // 3. Hot-reload agent identity configuration
+  // ── POST /auth/init ──────────────────────────────────────────────────────
+  if (method === 'POST' && url === '/auth/init') {
     try {
-      agentId = await initializeAgent();
-      console.log(`🤖 Hot-reloaded successfully. New Agent ID: ${agentId.toString()}`);
-    } catch (e: any) {
-      console.warn("⚠️ Hot-reloaded clients, but Identity check returned warning/failure:", e.message);
-    }
+      const body = await getBody(req);
+      const { userId, deviceId } = body;
+      const email = userId;
+      console.log('Auth init called with:', { userId, deviceId });
 
-    res.json({
-      success: true,
-      message: 'Keys successfully saved and activated in memory!',
+      if (!userId || !deviceId) {
+        sendJSON(res, 400, { error: 'Missing userId or deviceId' });
+        return;
+      }
+      if (userId.length > 50) {
+        sendJSON(res, 400, { error: 'Email must be under 50 characters' });
+        return;
+      }
+
+      // Create user (ignore already exists)
+      const createRes = await fetch('https://api.circle.com/v1/w3s/users', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ userId })
+      });
+      const createData: any = await createRes.json();
+      console.log('Create user response:', createData);
+      if (!createRes.ok && createData.code !== 155101) {
+        sendJSON(res, 400, { error: createData.message });
+        return;
+      }
+
+      // Get email token
+      const tokenRes = await fetch('https://api.circle.com/v1/w3s/users/email/token', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          userId: email,
+          deviceId: deviceId,
+          email: email,
+          idempotencyKey: randomUUID()
+        })
+      });
+      const tokenData: any = await tokenRes.json();
+      console.log('Email token response:', tokenData);
+      if (!tokenRes.ok) {
+        sendJSON(res, 400, { error: tokenData.message || 'Failed to send OTP' });
+        return;
+      }
+
+      const { otpToken, deviceToken, deviceEncryptionKey } = tokenData.data;
+      sendJSON(res, 200, { otpToken, deviceToken, deviceEncryptionKey });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
+
+  // ── POST /auth/signin ────────────────────────────────────────────────────
+  if (method === 'POST' && url === '/auth/signin') {
+    try {
+      const body = await getBody(req);
+      const { userId, deviceId } = body;
+      const email = userId;
+      const tokenRes = await fetch('https://api.circle.com/v1/w3s/users/email/token', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          userId: email,
+          deviceId: deviceId,
+          email: email,
+          idempotencyKey: randomUUID()
+        })
+      });
+      const data: any = await tokenRes.json();
+      if (!tokenRes.ok) {
+        console.error('Circle signin error:', data);
+        sendJSON(res, 404, { error: 'No account found with this email. Please create an account first.' });
+        return;
+      }
+      const { otpToken, deviceToken, deviceEncryptionKey } = data.data;
+      sendJSON(res, 200, { otpToken, deviceToken, deviceEncryptionKey });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
+
+  // ── POST /auth/initialize ────────────────────────────────────────────────
+  if (method === 'POST' && url === '/auth/initialize') {
+    try {
+      const body = await getBody(req);
+      const { userToken } = body;
+      if (!userToken) {
+        sendJSON(res, 400, { error: 'Missing userToken' });
+        return;
+      }
+      const apiKey = process.env.CIRCLE_API_KEY;
+      const initRes = await fetch('https://api.circle.com/v1/w3s/user/initialize', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'X-User-Token': userToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ idempotencyKey: randomUUID(), blockchains: ['ARC-TESTNET'] })
+      });
+      const initData: any = await initRes.json();
+      if (!initRes.ok) {
+        sendJSON(res, initRes.status, { error: initData.message });
+        return;
+      }
+      sendJSON(res, 200, { challengeId: initData.data?.challengeId });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
+
+  // ── POST /auth/wallets ───────────────────────────────────────────────────
+  if (method === 'POST' && url === '/auth/wallets') {
+    try {
+      const body = await getBody(req);
+      const { userToken } = body;
+      const apiKey = process.env.CIRCLE_API_KEY;
+      const walletsRes = await fetch('https://api.circle.com/v1/w3s/wallets?blockchain=ARC-TESTNET', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'X-User-Token': userToken
+        }
+      });
+      const walletsData: any = await walletsRes.json();
+      if (!walletsRes.ok) {
+        sendJSON(res, walletsRes.status, { error: walletsData.message });
+        return;
+      }
+      const wallets = walletsData.data?.wallets || [];
+      sendJSON(res, 200, { walletAddress: wallets[0]?.address || null });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
+
+  // ── POST /auth/social ────────────────────────────────────────────────────
+  if (method === 'POST' && url === '/auth/social') {
+    try {
+      const body = await getBody(req);
+      const { provider } = body;
+      const apiKey = process.env.CIRCLE_API_KEY;
+      const appId = process.env.CIRCLE_APP_ID || '';
+      const email = `social_${provider}_default_user@submanager.io`;
+
+      const createRes = await fetch('https://api.circle.com/v1/w3s/users', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: email })
+      });
+      const createData: any = await createRes.json();
+      if (!createRes.ok && createData.code !== 155101) {
+        sendJSON(res, 400, { error: createData.message });
+        return;
+      }
+
+      const tokenRes = await fetch('https://api.circle.com/v1/w3s/users/token', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: email })
+      });
+      const tokenData: any = await tokenRes.json();
+      if (!tokenRes.ok) {
+        sendJSON(res, tokenRes.status, { error: tokenData.message });
+        return;
+      }
+
+      sendJSON(res, 200, {
+        userToken: tokenData.data.userToken,
+        encryptionKey: tokenData.data.encryptionKey,
+        appId
+      });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
+
+  // ── GET /auth/config ─────────────────────────────────────────────────────
+  if (method === 'GET' && url === '/auth/config') {
+    sendJSON(res, 200, {
+      appId: process.env.CIRCLE_APP_ID || '',
+      googleClientId: process.env.CIRCLE_GOOGLE_CLIENT_ID || ''
+    });
+    return;
+  }
+
+  // ── GET /auth/appid ──────────────────────────────────────────────────────
+  if (method === 'GET' && url === '/auth/appid') {
+    sendJSON(res, 200, {
+      appId: process.env.CIRCLE_APP_ID || '',
+      googleClientId: process.env.CIRCLE_GOOGLE_CLIENT_ID || ''
+    });
+    return;
+  }
+
+  // ── GET /agent ───────────────────────────────────────────────────────────
+  if (method === 'GET' && url === '/agent') {
+    sendJSON(res, 200, {
       agentId: agentId.toString(),
       ownerAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
       validatorAddress: validatorAccount?.address || '0x0000000000000000000000000000000000000000'
     });
-
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    return;
   }
-});
 
-// POST /subscriptions - adds or reactivates a subscription
-app.post('/subscriptions', (req, res) => {
-  try {
-    const { name, amount, cost, costUSDC, renewalDate } = req.body;
-    
-    // Support amount, cost, or costUSDC
-    const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
-
-    if (!name || rawCost === undefined || !renewalDate) {
-      res.status(400).json({ error: 'Missing name, cost/amount, or renewalDate' });
-      return;
+  // ── GET /subscriptions ───────────────────────────────────────────────────
+  if (method === 'GET' && url === '/subscriptions') {
+    try {
+      const list = loadSubscriptions();
+      sendJSON(res, 200, list);
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
     }
+    return;
+  }
 
-    const list = loadSubscriptions();
-    const existingIndex = list.findIndex(s => s.name.toLowerCase() === name.toLowerCase());
-
-    const numericCost = parseFloat(rawCost);
-    if (isNaN(numericCost) || numericCost < 0) {
-      res.status(400).json({ error: 'Cost must be a positive number' });
-      return;
+  // ── GET /jobs ────────────────────────────────────────────────────────────
+  if (method === 'GET' && url === '/jobs') {
+    try {
+      const data = loadJobs();
+      sendJSON(res, 200, data);
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
     }
-    const usdcBigInt = BigInt(Math.round(numericCost * 1_000_000));
-    const parsedDate = new Date(renewalDate);
+    return;
+  }
 
-    // Duplicate Handling:
-    if (existingIndex !== -1) {
-      const existingSub = list[existingIndex];
-      
-      if (!existingSub.active) {
-        // Reactivate & Update
-        existingSub.active = true;
-        existingSub.amount = usdcBigInt;
-        existingSub.renewalDate = parsedDate;
-        saveSubscriptions(list);
-        console.log(`🔄 Reactivated and updated inactive subscriptionpreset: ${name} ($${numericCost})`);
-        res.json(existingSub);
-        return;
-      } else {
-        // Return 200 with friendly message
-        console.log(`ℹ️ Preset click ignored: ${name} is already active`);
-        res.json({ 
-          message: 'Already active — use Edit to update it',
-          subscription: existingSub
-        });
+  // ── POST /setup-keys ─────────────────────────────────────────────────────
+  if (method === 'POST' && url === '/setup-keys') {
+    try {
+      const body = await getBody(req);
+      const { ownerKey, validatorKey } = body;
+
+      const hexRegex = /^0x[a-fA-F0-9]{64}$/;
+      if (!ownerKey || !hexRegex.test(ownerKey)) {
+        sendJSON(res, 400, { error: 'Owner Key must be a valid 0x-prefixed 64-character hex string' });
         return;
       }
-    }
-
-    // New Subscription
-    const newSub: Subscription = {
-      id: `sub-${Date.now()}`,
-      name,
-      clientAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
-      renewalDate: parsedDate,
-      amount: usdcBigInt,
-      active: true
-    };
-
-    list.push(newSub);
-    saveSubscriptions(list);
-
-    console.log(`➕ Added new subscription: ${name} ($${numericCost})`);
-    res.status(201).json(newSub);
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// PUT /subscriptions/:name - updates name, cost, or renewal date
-app.put('/subscriptions/:name', (req, res) => {
-  try {
-    const targetName = req.params.name;
-    const { name, amount, cost, costUSDC, renewalDate } = req.body;
-
-    const list = loadSubscriptions();
-    const subIndex = list.findIndex(s => s.name.toLowerCase() === targetName.toLowerCase());
-
-    if (subIndex === -1) {
-      res.status(404).json({ error: `Subscription '${targetName}' not found` });
-      return;
-    }
-
-    const sub = list[subIndex];
-
-    if (name) {
-      // If changing name, ensure new name is not a duplicate of another contract
-      if (name.toLowerCase() !== targetName.toLowerCase() && list.some(s => s.name.toLowerCase() === name.toLowerCase())) {
-        res.status(400).json({ error: `Subscription '${name}' already exists` });
+      if (!validatorKey || !hexRegex.test(validatorKey)) {
+        sendJSON(res, 400, { error: 'Validator Key must be a valid 0x-prefixed 64-character hex string' });
         return;
       }
-      sub.name = name;
-    }
 
-    const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
-    if (rawCost !== undefined) {
+      const envPath = resolve(process.cwd(), '.env');
+      let envContent = '';
+      if (existsSync(envPath)) {
+        envContent = readFileSync(envPath, 'utf8');
+      }
+
+      const lines = envContent.split(/\r?\n/);
+      let ownerUpdated = false;
+      let validatorUpdated = false;
+
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('OWNER_PRIVATE_KEY=')) {
+          lines[i] = `OWNER_PRIVATE_KEY=${ownerKey}`;
+          ownerUpdated = true;
+        }
+        if (lines[i].startsWith('VALIDATOR_PRIVATE_KEY=')) {
+          lines[i] = `VALIDATOR_PRIVATE_KEY=${validatorKey}`;
+          validatorUpdated = true;
+        }
+      }
+
+      if (!ownerUpdated) lines.push(`OWNER_PRIVATE_KEY=${ownerKey}`);
+      if (!validatorUpdated) lines.push(`VALIDATOR_PRIVATE_KEY=${validatorKey}`);
+
+      writeFileSync(envPath, lines.join('\n'), 'utf8');
+      console.log('✅ Keys successfully updated inside .env file');
+
+      process.env.OWNER_PRIVATE_KEY = ownerKey;
+      process.env.VALIDATOR_PRIVATE_KEY = validatorKey;
+      reinitializeConfig();
+      console.log('✅ Viem Clients successfully reinitialized in memory');
+
+      try {
+        agentId = await initializeAgent();
+        console.log(`🤖 Hot-reloaded successfully. New Agent ID: ${agentId.toString()}`);
+      } catch (e: any) {
+        console.warn('⚠️ Hot-reloaded clients, but Identity check returned warning/failure:', e.message);
+      }
+
+      sendJSON(res, 200, {
+        success: true,
+        message: 'Keys successfully saved and activated in memory!',
+        agentId: agentId.toString(),
+        ownerAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
+        validatorAddress: validatorAccount?.address || '0x0000000000000000000000000000000000000000'
+      });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
+
+  // ── POST /subscriptions ──────────────────────────────────────────────────
+  if (method === 'POST' && url === '/subscriptions') {
+    try {
+      const body = await getBody(req);
+      const { name, amount, cost, costUSDC, renewalDate } = body;
+
+      const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
+
+      if (!name || rawCost === undefined || !renewalDate) {
+        sendJSON(res, 400, { error: 'Missing name, cost/amount, or renewalDate' });
+        return;
+      }
+
       const numericCost = parseFloat(rawCost);
       if (isNaN(numericCost) || numericCost < 0) {
-        res.status(400).json({ error: 'Cost must be a positive number' });
+        sendJSON(res, 400, { error: 'Cost must be a positive number' });
         return;
       }
-      sub.amount = BigInt(Math.round(numericCost * 1_000_000));
-    }
 
-    if (renewalDate) {
-      sub.renewalDate = new Date(renewalDate);
-    }
+      const list = loadSubscriptions();
+      const existingIndex = list.findIndex(s => s.name.toLowerCase() === name.toLowerCase());
+      const usdcBigInt = BigInt(Math.round(numericCost * 1_000_000));
+      const parsedDate = new Date(renewalDate);
 
-    saveSubscriptions(list);
-    console.log(`📝 Updated subscription: ${targetName}`);
-    res.json(sub);
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
+      if (existingIndex !== -1) {
+        const existingSub = list[existingIndex];
+        if (!existingSub.active) {
+          existingSub.active = true;
+          existingSub.amount = usdcBigInt;
+          existingSub.renewalDate = parsedDate;
+          saveSubscriptions(list);
+          console.log(`🔄 Reactivated and updated inactive subscription: ${name} ($${numericCost})`);
+          sendJSON(res, 200, existingSub);
+          return;
+        } else {
+          console.log(`ℹ️ Preset click ignored: ${name} is already active`);
+          sendJSON(res, 200, {
+            message: 'Already active — use Edit to update it',
+            subscription: existingSub
+          });
+          return;
+        }
+      }
+
+      const newSub: Subscription = {
+        id: `sub-${Date.now()}`,
+        name,
+        clientAddress: ownerAccount?.address || '0x0000000000000000000000000000000000000000',
+        renewalDate: parsedDate,
+        amount: usdcBigInt,
+        active: true
+      };
+
+      list.push(newSub);
+      saveSubscriptions(list);
+      console.log(`➕ Added new subscription: ${name} ($${numericCost})`);
+      sendJSON(res, 201, newSub);
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
   }
-});
 
-// DELETE /subscriptions/:name - marks as inactive (does NOT trigger a job)
-app.delete('/subscriptions/:name', (req, res) => {
-  try {
-    const targetName = req.params.name;
-    const list = loadSubscriptions();
-    const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+  // ── PUT /subscriptions/:name ─────────────────────────────────────────────
+  {
+    const params = matchRoute('/subscriptions/:name', url);
+    if (method === 'PUT' && params) {
+      try {
+        const targetName = params.name;
+        const body = await getBody(req);
+        const { name, amount, cost, costUSDC, renewalDate } = body;
 
-    if (!sub) {
-      res.status(404).json({ error: `Subscription '${targetName}' not found` });
+        const list = loadSubscriptions();
+        const subIndex = list.findIndex(s => s.name.toLowerCase() === targetName.toLowerCase());
+
+        if (subIndex === -1) {
+          sendJSON(res, 404, { error: `Subscription '${targetName}' not found` });
+          return;
+        }
+
+        const sub = list[subIndex];
+
+        if (name) {
+          if (
+            name.toLowerCase() !== targetName.toLowerCase() &&
+            list.some(s => s.name.toLowerCase() === name.toLowerCase())
+          ) {
+            sendJSON(res, 400, { error: `Subscription '${name}' already exists` });
+            return;
+          }
+          sub.name = name;
+        }
+
+        const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
+        if (rawCost !== undefined) {
+          const numericCost = parseFloat(rawCost);
+          if (isNaN(numericCost) || numericCost < 0) {
+            sendJSON(res, 400, { error: 'Cost must be a positive number' });
+            return;
+          }
+          sub.amount = BigInt(Math.round(numericCost * 1_000_000));
+        }
+
+        if (renewalDate) {
+          sub.renewalDate = new Date(renewalDate);
+        }
+
+        saveSubscriptions(list);
+        console.log(`📝 Updated subscription: ${targetName}`);
+        sendJSON(res, 200, sub);
+      } catch (e: any) {
+        sendJSON(res, 500, { error: e.message });
+      }
       return;
     }
-
-    sub.active = false;
-    saveSubscriptions(list);
-    console.log(`🗑️ Deactivated subscription: ${targetName}`);
-    res.json({ message: `Subscription '${targetName}' deactivated.`, subscription: sub });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
   }
-});
 
-// POST /subscriptions/:name/cancel - triggers the full ERC-8183 cancellation job
-app.post('/subscriptions/:name/cancel', (req, res) => {
-  try {
-    const targetName = req.params.name;
-    const list = loadSubscriptions();
-    const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+  // ── DELETE /subscriptions/:name ──────────────────────────────────────────
+  {
+    const params = matchRoute('/subscriptions/:name', url);
+    if (method === 'DELETE' && params) {
+      try {
+        const targetName = params.name;
+        const list = loadSubscriptions();
+        const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
 
-    if (!sub) {
-      res.status(404).json({ error: `Subscription '${targetName}' not found` });
+        if (!sub) {
+          sendJSON(res, 404, { error: `Subscription '${targetName}' not found` });
+          return;
+        }
+
+        sub.active = false;
+        saveSubscriptions(list);
+        console.log(`🗑️ Deactivated subscription: ${targetName}`);
+        sendJSON(res, 200, {
+          message: `Subscription '${targetName}' deactivated.`,
+          subscription: sub
+        });
+      } catch (e: any) {
+        sendJSON(res, 500, { error: e.message });
+      }
       return;
     }
+  }
 
-    if (!sub.active) {
-      res.status(400).json({ error: `Subscription '${targetName}' is already inactive/cancelled.` });
+  // ── POST /subscriptions/:name/cancel ────────────────────────────────────
+  {
+    const params = matchRoute('/subscriptions/:name/cancel', url);
+    if (method === 'POST' && params) {
+      try {
+        const targetName = params.name;
+        const list = loadSubscriptions();
+        const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+
+        if (!sub) {
+          sendJSON(res, 404, { error: `Subscription '${targetName}' not found` });
+          return;
+        }
+        if (!sub.active) {
+          sendJSON(res, 400, { error: `Subscription '${targetName}' is already inactive/cancelled.` });
+          return;
+        }
+
+        console.log(`⚡ Manual Cancellation triggered for ${targetName}...`);
+        sub.active = false;
+        saveSubscriptions(list);
+
+        executeCancellationJob(sub.name, agentId)
+          .then(() => console.log(`✅ Completed async cancellation job for ${targetName}`))
+          .catch(err => console.error(`❌ Async cancellation job failed for ${targetName}:`, err));
+
+        sendJSON(res, 200, {
+          message: `ERC-8183 cancellation job successfully triggered for '${targetName}'.`,
+          status: 'cancellation_triggered'
+        });
+      } catch (e: any) {
+        sendJSON(res, 500, { error: e.message });
+      }
       return;
     }
-
-    console.log(`⚡ Manual Cancellation triggered for ${targetName}...`);
-    
-    // Set inactive immediately
-    sub.active = false;
-    saveSubscriptions(list);
-
-    // Trigger full job lifecycle asynchronously
-    executeCancellationJob(sub.name, agentId)
-      .then(() => {
-        console.log(`✅ Completed async cancellation job for ${targetName}`);
-      })
-      .catch((err) => {
-        console.error(`❌ Async cancellation job failed for ${targetName}:`, err);
-      });
-
-    res.json({ 
-      message: `ERC-8183 cancellation job successfully triggered for '${targetName}'.`,
-      status: 'cancellation_triggered'
-    });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
   }
-});
 
-// POST /trigger - immediately runs the renewal check once
-app.post('/trigger', async (req, res) => {
-  try {
-    console.log('⚡ Manual renewal check triggered via API.');
-    await checkAndProcessRenewals(agentId);
-    res.json({ message: 'Renewal check executed successfully.', status: 'triggered' });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
+  // ── POST /trigger ────────────────────────────────────────────────────────
+  if (method === 'POST' && url === '/trigger') {
+    try {
+      console.log('⚡ Manual renewal check triggered via API.');
+      await checkAndProcessRenewals(agentId);
+      sendJSON(res, 200, { message: 'Renewal check executed successfully.', status: 'triggered' });
+    } catch (e: any) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
   }
+
+  // ── GET / (dashboard) ────────────────────────────────────────────────────
+  if (method === 'GET' && url === '/') {
+    sendFile(res, join(process.cwd(), 'index.html'));
+    return;
+  }
+
+  // ── Static file fallback ─────────────────────────────────────────────────
+  if (method === 'GET') {
+    sendFile(res, join(process.cwd(), url));
+    return;
+  }
+
+  // ── 404 ──────────────────────────────────────────────────────────────────
+  sendJSON(res, 404, { error: 'Route not found' });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Express API server running on http://localhost:${PORT}`);
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
+
+process.on('uncaughtException', (err) => console.error('Uncaught:', err.message));
+process.on('unhandledRejection', (reason) => console.error('Rejection:', reason));

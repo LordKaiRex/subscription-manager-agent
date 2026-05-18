@@ -1,3 +1,7 @@
+process.env.NODE_OPTIONS = '--dns-result-order=ipv4first';
+import { setDefaultResultOrder } from 'node:dns';
+setDefaultResultOrder('ipv4first');
+
 import { watchJobs } from './jobs.js';
 import { initializeAgent } from './agent.js';
 import { checkAndProcessRenewals } from './checker.js';

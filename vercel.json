@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "src/server.ts", "use": "@vercel/node" },
+    { "src": "index.html", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/auth/(.*)", "dest": "src/server.ts" },
+    { "src": "/subscriptions(.*)", "dest": "src/server.ts" },
+    { "src": "/jobs", "dest": "src/server.ts" },
+    { "src": "/agent", "dest": "src/server.ts" },
+    { "src": "/trigger", "dest": "src/server.ts" },
+    { "src": "/setup-keys", "dest": "src/server.ts" },
+    { "src": "/(.*)", "dest": "index.html" }
+  ]
+}
