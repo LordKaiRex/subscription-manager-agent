@@ -142,6 +142,7 @@
         this.iframe.style.border = 'none';
 
         this.messageHandler = (event) => {
+          console.log('✉️ Incoming postMessage from:', event.origin, 'Data:', event.data);
           if (event.origin !== this.serviceUrl) return;
           const d = event.data;
 
