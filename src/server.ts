@@ -318,6 +318,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 
   // ── GET /auth/appid ──────────────────────────────────────────────────────
   if (method === 'GET' && url === '/auth/appid') {
+    console.log('CIRCLE_APP_ID:', process.env.CIRCLE_APP_ID);
     sendJSON(res, 200, {
       appId: process.env.CIRCLE_APP_ID || '',
       googleClientId: process.env.CIRCLE_GOOGLE_CLIENT_ID || ''

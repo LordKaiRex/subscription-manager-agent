@@ -832,6 +832,9 @@
           // Reset SDK singleton so fresh credentials are used
           window.W3SSdk.instance = null;
 
+          console.log('W3SSdk available:', typeof window.W3SSdk);
+          console.log('CircleW3s:', typeof window.CircleW3s);
+
           // Construct with correct shape — loginConfigs carries OTP tokens into the postMessage
           const sdk = new window.W3SSdk(
             {
