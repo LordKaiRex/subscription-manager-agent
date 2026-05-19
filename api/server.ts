@@ -294,15 +294,97 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
+    // ── POST /subscriptions/:name/cancel ────────────────────────────────────
+    if (resolvedPath.startsWith('/subscriptions/') && resolvedPath.endsWith('/cancel') && method === 'POST') {
+      const parts = resolvedPath.split('/');
+      const targetName = decodeURIComponent(parts[2]);
+      const list = loadSubscriptions();
+      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+
+      if (!sub) {
+        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
+        return;
+      }
+      if (!sub.active) {
+        res.status(400).json(safeJSON({ error: `Subscription '${targetName}' is already inactive/cancelled.` }));
+        return;
+      }
+
+      console.log(`⚡ Manual Cancellation triggered for ${targetName}...`);
+      sub.active = false;
+      saveSubscriptions(list);
+
+      let agentId = 14535n;
+      try {
+        const id = await initializeAgent();
+        if (id > 1n) agentId = id;
+      } catch (e) {}
+
+      executeCancellationJob(sub.name, agentId)
+        .then(() => console.log(`✅ Completed async cancellation job for ${targetName}`))
+        .catch(err => console.error(`❌ Async cancellation job failed for ${targetName}:`, err));
+
+      res.status(200).json(safeJSON({
+        message: `ERC-8183 cancellation job successfully triggered for '${targetName}'.`,
+        status: 'cancellation_triggered'
+      }));
+      return;
+    }
+
+    // ── PUT /subscriptions/:name ─────────────────────────────────────────────
+    if (resolvedPath.startsWith('/subscriptions/') && method === 'PUT' && !resolvedPath.endsWith('/cancel')) {
+      const targetName = decodeURIComponent(resolvedPath.split('/subscriptions/')[1].split('?')[0]);
+      const list = loadSubscriptions();
+      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+
+      if (!sub) {
+        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
+        return;
+      }
+
+      const { name, cost, costUSDC, renewalDate, active } = body;
+      const rawCost = cost !== undefined ? cost : costUSDC;
+      if (name) sub.name = name;
+      if (renewalDate) sub.renewalDate = new Date(renewalDate);
+      if (active !== undefined) sub.active = active;
+      if (rawCost !== undefined) {
+        const numericCost = parseFloat(rawCost);
+        if (!isNaN(numericCost)) sub.amount = BigInt(Math.round(numericCost * 1_000_000));
+      }
+      saveSubscriptions(list);
+      res.status(200).json(safeJSON({ success: true, subscription: sub }));
+      return;
+    }
+
+    // ── DELETE /subscriptions/:name ──────────────────────────────────────────
+    if (resolvedPath.startsWith('/subscriptions/') && method === 'DELETE' && !resolvedPath.endsWith('/cancel')) {
+      const targetName = decodeURIComponent(resolvedPath.split('/subscriptions/')[1].split('?')[0]);
+      const list = loadSubscriptions();
+      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+
+      if (!sub) {
+        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
+        return;
+      }
+
+      sub.active = false;
+      saveSubscriptions(list);
+      res.status(200).json(safeJSON({
+        message: `Subscription '${targetName}' deactivated.`,
+        subscription: sub
+      }));
+      return;
+    }
+
     // ── GET /subscriptions ───────────────────────────────────────────────────
-    if ((resolvedPath === '/subscriptions' || resolvedPath.includes('/subscriptions')) && method === 'GET' && !resolvedPath.endsWith('/cancel')) {
+    if ((resolvedPath === '/subscriptions' || resolvedPath === '/subscriptions/') && method === 'GET') {
       const list = loadSubscriptions();
       res.status(200).json(safeJSON(list));
       return;
     }
 
     // ── POST /subscriptions ──────────────────────────────────────────────────
-    if ((resolvedPath === '/subscriptions' || resolvedPath.includes('/subscriptions')) && method === 'POST' && !resolvedPath.endsWith('/cancel')) {
+    if ((resolvedPath === '/subscriptions' || resolvedPath === '/subscriptions/') && method === 'POST') {
       const { name, amount, cost, costUSDC, renewalDate } = body;
       const rawCost = amount !== undefined ? amount : (cost !== undefined ? cost : costUSDC);
 
@@ -341,86 +423,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       saveSubscriptions(list);
       res.status(200).json(safeJSON({ success: true, subscriptions: list }));
-      return;
-    }
-
-    // ── PUT /subscriptions/:name ─────────────────────────────────────────────
-    if (resolvedPath.startsWith('/subscriptions/') && method === 'PUT' && !resolvedPath.endsWith('/cancel')) {
-      const targetName = decodeURIComponent(resolvedPath.split('/subscriptions/')[1].split('?')[0]);
-      const list = loadSubscriptions();
-      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
-
-      if (!sub) {
-        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
-        return;
-      }
-
-      const { name, cost, renewalDate } = body;
-      if (name) sub.name = name;
-      if (renewalDate) sub.renewalDate = new Date(renewalDate);
-      if (cost !== undefined) {
-        const numericCost = parseFloat(cost);
-        if (!isNaN(numericCost)) sub.amount = BigInt(Math.round(numericCost * 1_000_000));
-      }
-      saveSubscriptions(list);
-      res.status(200).json(safeJSON({ success: true, subscription: sub }));
-      return;
-    }
-
-    // ── DELETE /subscriptions/:name ──────────────────────────────────────────
-    if (resolvedPath.startsWith('/subscriptions/') && method === 'DELETE' && !resolvedPath.endsWith('/cancel')) {
-      const targetName = decodeURIComponent(resolvedPath.split('/subscriptions/')[1].split('?')[0]);
-      const list = loadSubscriptions();
-      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
-
-      if (!sub) {
-        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
-        return;
-      }
-
-      sub.active = false;
-      saveSubscriptions(list);
-      res.status(200).json(safeJSON({
-        message: `Subscription '${targetName}' deactivated.`,
-        subscription: sub
-      }));
-      return;
-    }
-
-    // ── POST /subscriptions/:name/cancel ────────────────────────────────────
-    if (resolvedPath.startsWith('/subscriptions/') && resolvedPath.endsWith('/cancel') && method === 'POST') {
-      const parts = resolvedPath.split('/');
-      const targetName = decodeURIComponent(parts[2]);
-      const list = loadSubscriptions();
-      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
-
-      if (!sub) {
-        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
-        return;
-      }
-      if (!sub.active) {
-        res.status(400).json(safeJSON({ error: `Subscription '${targetName}' is already inactive/cancelled.` }));
-        return;
-      }
-
-      console.log(`⚡ Manual Cancellation triggered for ${targetName}...`);
-      sub.active = false;
-      saveSubscriptions(list);
-
-      let agentId = 14535n;
-      try {
-        const id = await initializeAgent();
-        if (id > 1n) agentId = id;
-      } catch (e) {}
-
-      executeCancellationJob(sub.name, agentId)
-        .then(() => console.log(`✅ Completed async cancellation job for ${targetName}`))
-        .catch(err => console.error(`❌ Async cancellation job failed for ${targetName}:`, err));
-
-      res.status(200).json(safeJSON({
-        message: `ERC-8183 cancellation job successfully triggered for '${targetName}'.`,
-        status: 'cancellation_triggered'
-      }));
       return;
     }
 

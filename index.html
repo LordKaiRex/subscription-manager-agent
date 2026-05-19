@@ -81,6 +81,74 @@
       }
     }
   </script>
+  
+  <script>
+  function loadCircleSDK() {
+    return new Promise((resolve, reject) => {
+      if (window.W3SSdk) { resolve(window.W3SSdk); return; }
+      const script = document.createElement('script');
+      script.src = 'https://unpkg.com/@circle-fin/w3s-pw-web-sdk@1.0.11/dist/umd/index.js';
+      script.onload = () => {
+        console.log('SDK loaded, W3SSdk:', typeof window.W3SSdk);
+        if (window.W3SSdk) resolve(window.W3SSdk);
+        else reject(new Error('W3SSdk not found after load'));
+      };
+      script.onerror = () => reject(new Error('Failed to load Circle SDK from CDN'));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function initCircleSDK(otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) {
+    try {
+      await loadCircleSDK();
+    } catch (e) {
+      if (window.showStepError) window.showStepError('Circle SDK failed to load: ' + e.message);
+      return;
+    }
+    const appIdRes = await fetch('/auth/appid');
+    const { appId } = await appIdRes.json();
+    console.log('AppId:', appId);
+    if (!appId || appId.length < 5) {
+      if (window.showStepError) window.showStepError('CIRCLE_APP_ID not configured on server');
+      return;
+    }
+    const sdk = new window.W3SSdk();
+    await sdk.setAppSettings({ appId });
+    sdk.setAuthentication({ userToken: otpToken, encryptionKey: deviceEncryptionKey });
+    sdk.execute(deviceToken, async (err, result) => {
+      if (err) { if (window.showStepError) window.showStepError(err.message); return; }
+      const userToken = result?.data?.userToken || otpToken;
+      const encryptionKey = result?.data?.encryptionKey || deviceEncryptionKey;
+      if (isSignIn) {
+        const walletsRes = await fetch('/auth/wallets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userToken })
+        });
+        const { walletAddress } = await walletsRes.json();
+        if (window.completeAuth) window.completeAuth(walletAddress, email);
+      } else {
+        const initRes = await fetch('/auth/initialize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userToken })
+        });
+        const { challengeId } = await initRes.json();
+        sdk.setAuthentication({ userToken, encryptionKey });
+        sdk.execute(challengeId, async (err2) => {
+          if (err2) { if (window.showStepError) window.showStepError(err2.message); return; }
+          const walletsRes = await fetch('/auth/wallets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userToken })
+          });
+          const { walletAddress } = await walletsRes.json();
+          if (window.completeAuth) window.completeAuth(walletAddress, email);
+        });
+      }
+    });
+  }
+  </script>
 </head>
 <body class="antialiased min-h-screen flex flex-col items-center py-8 px-4">
   <div id="root" class="w-full max-w-5xl"></div>
@@ -215,21 +283,7 @@
         setTimeout(() => setNotif(null), 10000);
       };
 
-      // Load Circle SDK dynamically after React mounts (avoids error #418 hydration mismatch)
-      useEffect(() => {
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/@circle-fin/w3s-pw-web-sdk/dist/umd/index.js';
-        script.async = true;
-        script.onload = () => {
-          console.log('Circle SDK loaded dynamically:', typeof window.W3SSdk);
-        };
-        document.body.appendChild(script);
-        return () => {
-          if (document.body.contains(script)) {
-            document.body.removeChild(script);
-          }
-        };
-      }, []);
+      // Removed old dynamic useEffect script loader since it is replaced by loadCircleSDK Promise
 
       // Fetch app configurations on startup
       useEffect(() => {
@@ -700,19 +754,23 @@
         showNotification(`Welcome back! Signed in as ${email}`);
       };
 
-      // Helper: finish the auth flow after wallet address is confirmed
-      const completeAuth = (walletAddress) => {
+      const completeAuth = (walletAddress, email) => {
         if (!walletAddress) {
           showStepError('Auth completed but no wallet address returned by Circle.');
           return;
         }
         setWizardWalletAddress(walletAddress);
-        const sessionUser = { email: wizardEmail, walletAddress, userId: wizardEmail };
+        const targetEmail = email || wizardEmail;
+        const sessionUser = { email: targetEmail, walletAddress, userId: targetEmail };
         setCircleUser(sessionUser);
         sessionStorage.setItem('submanager_circle_user', JSON.stringify(sessionUser));
         setWizardStep(3);
         setShowLoginModal(false);
       };
+
+      // Expose helpers globally for global initCircleSDK script block
+      window.showStepError = showStepError;
+      window.completeAuth = completeAuth;
 
       // ── OTP Verification (server-side, no SDK iframe) ──────────────────────
       // Called when user clicks "Verify & Continue" in Step 2.
@@ -821,72 +879,10 @@
           setIsWizardLoading(true);
 
           setTimeout(async () => {
-            try {
-              // Fetch appId from server
-              const appIdRes = await fetch(`${API_URL}/auth/appid`);
-              const { appId } = await appIdRes.json();
-              console.log('AppId from server:', appId, 'length:', appId?.length);
-              if (!appId || appId.length < 10) {
-                showStepError('CIRCLE_APP_ID missing on server — check Vercel env vars');
-                return;
-              }
-
-              if (typeof window.W3SSdk === 'undefined') {
-                showStepError('Circle Web SDK failed to load. Please refresh the page and try again.');
-                return;
-              }
-
-              // Real Circle SDK uses W3SSdk class
-              const sdk = new window.W3SSdk();
-              await sdk.setAppSettings({ appId });
-              sdk.setAuthentication({
-                userToken: otpToken,
-                encryptionKey: deviceEncryptionKey
-              });
-
-              setIsWizardLoading(false);
-
-              // This triggers OTP input inside SDK iframe
-              sdk.execute(deviceToken, async (err, result) => {
-                if (err) { showStepError(err.message); return; }
-                const verifiedUserToken = result?.data?.userToken || otpToken;
-                const verifiedEncryptionKey = result?.data?.encryptionKey || deviceEncryptionKey;
-
-                setIsWizardLoading(true);
-
-                // Now initialize wallet
-                const initRes = await fetch(`${API_URL}/auth/initialize`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ userToken: verifiedUserToken })
-                });
-                const { challengeId } = await initRes.json();
-
-                if (challengeId) {
-                  sdk.setAuthentication({ userToken: verifiedUserToken, encryptionKey: verifiedEncryptionKey });
-                  sdk.execute(challengeId, async (err2, result2) => {
-                    if (err2) { showStepError(err2.message); return; }
-                    const walletsRes = await fetch(`${API_URL}/auth/wallets`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ userToken: verifiedUserToken })
-                    });
-                    const { walletAddress } = await walletsRes.json();
-                    completeAuth(walletAddress);
-                  });
-                } else {
-                  // No challenge needed (wallet already initialized or email-only flow)
-                  const walletsRes = await fetch(`${API_URL}/auth/wallets`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ userToken: verifiedUserToken })
-                  });
-                  const { walletAddress } = await walletsRes.json();
-                  completeAuth(walletAddress);
-                }
-              });
-            } catch (sdkError) {
-              showStepError(sdkError.message);
+            if (window.initCircleSDK) {
+              await window.initCircleSDK(otpToken, deviceToken, deviceEncryptionKey, email, isSignIn);
+            } else {
+              showStepError('Circle SDK init function is not available.');
             }
           }, 200);
 
