@@ -42,11 +42,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   console.log('Request URL:', req.url, 'Resolved Path:', resolvedPath, 'Method:', method);
 
   try {
-    // ── Serve local files in /public/ ─────────────────────────────────────────
-    if (resolvedPath.startsWith('/public/') && method === 'GET') {
+    // ── Serve local files in /public/ and /circle-sdk.js ──────────────────────
+    if ((resolvedPath.startsWith('/public/') || resolvedPath === '/circle-sdk.js') && method === 'GET') {
       const { join } = await import('path');
       const { existsSync, readFileSync } = await import('fs');
-      const filePath = join(process.cwd(), resolvedPath);
+      const relativePath = resolvedPath === '/circle-sdk.js' ? 'public/circle-sdk.js' : resolvedPath;
+      const filePath = join(process.cwd(), relativePath);
       if (existsSync(filePath)) {
         const content = readFileSync(filePath);
         res.setHeader('Content-Type', 'application/javascript');

@@ -1,6 +1,5 @@
 {
   "rewrites": [
-    { "source": "/public/:path*", "destination": "/api/server" },
     { "source": "/auth/:path*", "destination": "/api/server" },
     { "source": "/subscriptions/:path*", "destination": "/api/server" },
     { "source": "/subscriptions", "destination": "/api/server" },
