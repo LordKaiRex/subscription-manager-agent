@@ -179,6 +179,90 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
+    // ── POST /auth/verify ────────────────────────────────────────────────────
+    if ((resolvedPath === '/auth/verify' || resolvedPath.includes('/auth/verify')) && method === 'POST') {
+      const { userId, otp, otpToken, deviceToken, deviceEncryptionKey } = body;
+      console.log('Auth verify called with:', { userId, otp });
+
+      if (!userId || !otp) {
+        res.status(400).json(safeJSON({ error: 'Missing email or verification code' }));
+        return;
+      }
+
+      if (otp.length !== 6 || isNaN(Number(otp))) {
+        res.status(400).json(safeJSON({ error: 'Invalid verification code format. Must be 6 digits.' }));
+        return;
+      }
+
+      // Fetch user token directly using Circle's developer APIs
+      const sessionRes = await fetch('https://api.circle.com/v1/w3s/users/token', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ userId })
+      });
+
+      const sessionData: any = await sessionRes.json();
+      console.log('Session response:', sessionData);
+      if (!sessionRes.ok) {
+        res.status(400).json(safeJSON({ error: sessionData.message }));
+        return;
+      }
+      const userToken = sessionData.data?.userToken;
+
+      // Get user wallets
+      const walletsRes = await fetch('https://api.circle.com/v1/w3s/wallets?blockchain=ARC-TESTNET', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'X-User-Token': userToken
+        }
+      });
+
+      const walletsData: any = await walletsRes.json();
+      let wallets = walletsData.data?.wallets || [];
+
+      // If no wallet exists, trigger wallet initialization on Circle
+      if (wallets.length === 0) {
+        const initRes = await fetch('https://api.circle.com/v1/w3s/user/initialize', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+            'X-User-Token': userToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            idempotencyKey: crypto.randomUUID(),
+            blockchains: ['ARC-TESTNET']
+          })
+        });
+        const initData: any = await initRes.json();
+        console.log('Initialize wallets response:', initData);
+
+        // Allow Circle backend a brief moment to deploy the wallet
+        await new Promise(r => setTimeout(r, 2000));
+        
+        const walletsResRetry = await fetch('https://api.circle.com/v1/w3s/wallets?blockchain=ARC-TESTNET', {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+            'X-User-Token': userToken
+          }
+        });
+        const walletsDataRetry: any = await walletsResRetry.json();
+        wallets = walletsDataRetry.data?.wallets || [];
+      }
+
+      const walletAddress = wallets[0]?.address || '';
+      res.status(200).json(safeJSON({
+        userToken,
+        walletAddress
+      }));
+      return;
+    }
+
     // ── POST /auth/initialize ────────────────────────────────────────────────
     if ((resolvedPath === '/auth/initialize' || resolvedPath.includes('/auth/initialize')) && method === 'POST') {
       const { userToken } = body;

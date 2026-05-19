@@ -81,72 +81,61 @@
       }
     }
   </script>
-  
+  <script type='module' src='/public/auth.mjs'></script>
   <script>
-  function loadCircleSDK() {
-    return new Promise((resolve, reject) => {
-      if (window.CircleW3s && window.CircleW3s.W3SSdk) { resolve(window.CircleW3s.W3SSdk); return; }
-      const script = document.createElement('script');
-      script.src = '/circle-sdk.js';
-      script.onload = () => {
-        console.log('SDK loaded, CircleW3s:', typeof window.CircleW3s);
-        if (window.CircleW3s && window.CircleW3s.W3SSdk) resolve(window.CircleW3s.W3SSdk);
-        else reject(new Error('CircleW3s.W3SSdk not found after load'));
-      };
-      script.onerror = () => reject(new Error('Failed to load Circle SDK from local path'));
-      document.head.appendChild(script);
+  async function initCircleSDK(otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) {
+    // Wait for module to load W3SSdk onto window
+    let attempts = 0;
+    while (!window.W3SSdk && attempts < 20) {
+      await new Promise(r => setTimeout(r, 250));
+      attempts++;
+    }
+    if (!window.W3SSdk) { showStepError('Circle SDK not ready — refresh page'); return; }
+
+    const appIdRes = await fetch('/auth/appid');
+    const { appId } = await appIdRes.json();
+
+    const sdk = new window.W3SSdk({
+      configs: {
+        appSettings: { appId },
+        authentication: { userToken: otpToken, encryptionKey: deviceEncryptionKey }
+      }
+    });
+
+    // verifyOtp shows the OTP input UI inside the SDK iframe
+    sdk.verifyOtp((err, result) => {
+      if (err) { showStepError(err.message); return; }
+      const userToken = result?.userToken || otpToken;
+      const encryptionKey = result?.encryptionKey || deviceEncryptionKey;
+      handlePostOTPVerification(sdk, appId, userToken, encryptionKey, email, isSignIn);
     });
   }
 
-  async function initCircleSDK(otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) {
-    try {
-      await loadCircleSDK();
-    } catch (e) {
-      if (window.showStepError) window.showStepError('Circle SDK failed to load: ' + e.message);
-      return;
-    }
-    const appIdRes = await fetch('/auth/appid');
-    const { appId } = await appIdRes.json();
-    console.log('AppId:', appId);
-    if (!appId || appId.length < 5) {
-      if (window.showStepError) window.showStepError('CIRCLE_APP_ID not configured on server');
-      return;
-    }
-    const sdk = new window.CircleW3s.W3SSdk();
-    await sdk.setAppSettings({ appId });
-    sdk.setAuthentication({ userToken: otpToken, encryptionKey: deviceEncryptionKey });
-    sdk.execute(deviceToken, async (err, result) => {
-      if (err) { if (window.showStepError) window.showStepError(err.message); return; }
-      const userToken = result?.data?.userToken || otpToken;
-      const encryptionKey = result?.data?.encryptionKey || deviceEncryptionKey;
-      if (isSignIn) {
+  async function handlePostOTPVerification(sdk, appId, userToken, encryptionKey, email, isSignIn) {
+    if (isSignIn) {
+      const walletsRes = await fetch('/auth/wallets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userToken })
+      });
+      const { walletAddress } = await walletsRes.json();
+      completeAuth(walletAddress, email);
+    } else {
+      const initRes = await fetch('/auth/initialize', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userToken })
+      });
+      const { challengeId } = await initRes.json();
+      sdk.setAuthentication({ userToken, encryptionKey });
+      sdk.execute(challengeId, async (err2) => {
+        if (err2) { showStepError(err2.message); return; }
         const walletsRes = await fetch('/auth/wallets', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userToken })
         });
         const { walletAddress } = await walletsRes.json();
-        if (window.completeAuth) window.completeAuth(walletAddress, email);
-      } else {
-        const initRes = await fetch('/auth/initialize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userToken })
-        });
-        const { challengeId } = await initRes.json();
-        sdk.setAuthentication({ userToken, encryptionKey });
-        sdk.execute(challengeId, async (err2) => {
-          if (err2) { if (window.showStepError) window.showStepError(err2.message); return; }
-          const walletsRes = await fetch('/auth/wallets', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userToken })
-          });
-          const { walletAddress } = await walletsRes.json();
-          if (window.completeAuth) window.completeAuth(walletAddress, email);
-        });
-      }
-    });
+        completeAuth(walletAddress, email);
+      });
+    }
   }
   </script>
 </head>
@@ -771,76 +760,6 @@
       // Expose helpers globally for global initCircleSDK script block
       window.showStepError = showStepError;
       window.completeAuth = completeAuth;
-
-      // ── OTP Verification (server-side, no SDK iframe) ──────────────────────
-      // Called when user clicks "Verify & Continue" in Step 2.
-      // Sends the typed OTP to /auth/verify which calls Circle's token refresh
-      // endpoint and returns a verified userToken + wallet address.
-      const verifyOTP = async () => {
-        const input = document.getElementById('otp-input');
-        const otp = input ? input.value.trim() : '';
-        if (!otp || otp.length < 4) {
-          setWizardError('Please enter the verification code from your email.');
-          return;
-        }
-        setIsWizardLoading(true);
-        setWizardError(null);
-        try {
-          const verifyRes = await fetch(`${API_URL}/auth/verify`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              otpToken:          currentUserToken,
-              otp,
-              deviceToken:       currentDeviceToken,
-              deviceEncryptionKey: currentEncryptionKey
-            })
-          });
-          const verifyData = await verifyRes.json();
-          if (!verifyRes.ok) {
-            setWizardError(verifyData.error || 'Invalid verification code. Please try again.');
-            setIsWizardLoading(false);
-            return;
-          }
-
-          const { userToken, encryptionKey, walletAddress } = verifyData;
-          currentUserToken = userToken;
-          currentEncryptionKey = encryptionKey || currentEncryptionKey;
-
-          if (walletAddress) {
-            // Wallet already exists — auth complete
-            completeAuth(walletAddress);
-          } else {
-            // New user — initialize wallet on Arc Testnet
-            const initRes = await fetch(`${API_URL}/auth/initialize`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userToken })
-            });
-            const initJson = await initRes.json();
-            console.log('Initialize response:', initJson);
-            // challengeId may be null on email-auth-only plans — wallet auto-created
-            // Fetch wallet regardless
-            const wRes = await fetch(`${API_URL}/auth/wallets`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userToken })
-            });
-            const wData = await wRes.json();
-            if (wData.walletAddress) {
-              completeAuth(wData.walletAddress);
-            } else {
-              setWizardError('Wallet not yet available. Please wait a moment and try again.');
-              setIsWizardLoading(false);
-            }
-          }
-        } catch (e) {
-          setWizardError(e.message);
-          setIsWizardLoading(false);
-        }
-      };
-      // Expose for the inline button onclick
-      window.__verifyOTP = verifyOTP;
 
 
       const executeCircleInit = async (email) => {

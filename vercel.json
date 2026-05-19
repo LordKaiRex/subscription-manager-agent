@@ -1,9 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "npm run vercel-build",
-  "outputDirectory": "public",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/server" },
     { "source": "/auth/(.*)", "destination": "/api/server" },
     { "source": "/subscriptions(.*)", "destination": "/api/server" },
     { "source": "/jobs(.*)", "destination": "/api/server" },
