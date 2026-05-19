@@ -42,6 +42,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   console.log('Request URL:', req.url, 'Resolved Path:', resolvedPath, 'Method:', method);
 
   try {
+    // ── Serve local files in /public/ ─────────────────────────────────────────
+    if (resolvedPath.startsWith('/public/') && method === 'GET') {
+      const { join } = await import('path');
+      const { existsSync, readFileSync } = await import('fs');
+      const filePath = join(process.cwd(), resolvedPath);
+      if (existsSync(filePath)) {
+        const content = readFileSync(filePath);
+        res.setHeader('Content-Type', 'application/javascript');
+        res.status(200).send(content);
+      } else {
+        res.status(404).json({ error: `File not found: ${filePath}` });
+      }
+      return;
+    }
+
     // ── GET /auth/appid ──────────────────────────────────────────────────────
     if ((resolvedPath === '/auth/appid' || resolvedPath.includes('/auth/appid')) && method === 'GET') {
       console.log('CIRCLE_APP_ID value:', process.env.CIRCLE_APP_ID);

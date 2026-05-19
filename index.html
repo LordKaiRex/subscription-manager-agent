@@ -87,13 +87,13 @@
     return new Promise((resolve, reject) => {
       if (window.W3SSdk) { resolve(window.W3SSdk); return; }
       const script = document.createElement('script');
-      script.src = 'https://unpkg.com/@circle-fin/w3s-pw-web-sdk@1.0.11/dist/umd/index.js';
+      script.src = '/public/circle-sdk.js';
       script.onload = () => {
         console.log('SDK loaded, W3SSdk:', typeof window.W3SSdk);
         if (window.W3SSdk) resolve(window.W3SSdk);
         else reject(new Error('W3SSdk not found after load'));
       };
-      script.onerror = () => reject(new Error('Failed to load Circle SDK from CDN'));
+      script.onerror = () => reject(new Error('Failed to load Circle SDK from local public path'));
       document.head.appendChild(script);
     });
   }
