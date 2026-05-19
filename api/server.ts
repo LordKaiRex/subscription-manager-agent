@@ -180,7 +180,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return;
       }
 
-      res.status(200).json(safeJSON({ challengeId: initData.data?.challengeId }));
+      // Return null (not undefined) so the frontend `if (challengeId)` check
+      // correctly identifies when no PIN/security-question challenge is needed
+      // (email-auth-only plans on Circle Testnet).
+      res.status(200).json(safeJSON({ challengeId: initData.data?.challengeId ?? null }));
       return;
     }
 

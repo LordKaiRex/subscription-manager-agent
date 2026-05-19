@@ -88,16 +88,29 @@
   <script type="text/babel">
     const { useState, useEffect } = React;
 
-    let circleDeviceId = sessionStorage.getItem('circle_device_id');
-    if (!circleDeviceId) {
-      circleDeviceId = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-        (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
-      sessionStorage.setItem('circle_device_id', circleDeviceId);
-    }
+    // Initialise circleDeviceId lazily to avoid any top-level side-effects
+    // that could trigger a React hydration mismatch (#418)
+    let circleDeviceId = null;
+    const getDeviceId = () => {
+      if (circleDeviceId) return circleDeviceId;
+      circleDeviceId = sessionStorage.getItem('circle_device_id');
+      if (!circleDeviceId) {
+        circleDeviceId = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+          (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+        sessionStorage.setItem('circle_device_id', circleDeviceId);
+      }
+      return circleDeviceId;
+    };
+
     const AGENTIC_COMMERCE_ADDRESS = '0x0747EEf0706327138c69792bF28Cd525089e4583';
     const REPUTATION_REGISTRY_ADDRESS = '0x8004B663056A597Dffe9eCcC1965A193B7388713';
     const RPC_URL = 'https://rpc.testnet.arc.network';
     const API_URL = '';
+
+    // Module-level variables so SDK callbacks always have access to the
+    // latest credentials even after async re-entries (fixes scope loss).
+    let currentUserToken = null;
+    let currentEncryptionKey = null;
 
     // React Error Boundary to catch render failures
     class ErrorBoundary extends React.Component {
@@ -819,6 +832,20 @@
         showNotification(`Welcome back! Signed in as ${email}`);
       };
 
+      // Helper: finish the auth flow after wallet address is confirmed
+      const completeAuth = (walletAddress) => {
+        if (!walletAddress) {
+          showStepError('Auth completed but no wallet address returned by Circle.');
+          return;
+        }
+        setWizardWalletAddress(walletAddress);
+        const sessionUser = { email: wizardEmail, walletAddress, userId: wizardEmail };
+        setCircleUser(sessionUser);
+        sessionStorage.setItem('submanager_circle_user', JSON.stringify(sessionUser));
+        setWizardStep(3);
+        setShowLoginModal(false);
+      };
+
       const initCircleSDK = async (otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) => {
         try {
           console.log('initCircleSDK called', { isSignIn, hasOtpToken: !!otpToken });
@@ -831,6 +858,10 @@
           }
           const appId = appIdData.appId;
           setWizardAppId(appId);
+
+          // Store in module-level vars so SDK callbacks can always access them
+          currentUserToken = otpToken;
+          currentEncryptionKey = deviceEncryptionKey;
 
           console.log('Creating W3SSdk...');
           console.log('W3SSdk type:', typeof W3SSdk);
@@ -849,11 +880,35 @@
             // onLoginComplete fires via onEmailLoginVerified after OTP entry
             async (err, result) => {
               if (err) {
+                console.error('SDK OTP error code:', err.code, err.message);
+                // Error 155633 = challenge already completed, 155604 = user already initialized
+                // In both cases the wallet may already exist — try fetching it directly
+                if (err.code === 155633 || err.code === 155604) {
+                  try {
+                    const wRes = await fetch(`${API_URL}/auth/wallets`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ userToken: currentUserToken })
+                    });
+                    const { walletAddress } = await wRes.json();
+                    if (walletAddress) {
+                      isSignIn ? completeSignIn(walletAddress, email) : completeAuth(walletAddress);
+                      return;
+                    }
+                  } catch (_) {}
+                }
                 showStepError('OTP verification failed: ' + (err.message || JSON.stringify(err)));
                 return;
               }
-              const verifiedUserToken  = result?.userToken  || otpToken;
-              const verifiedEncKey     = result?.encryptionKey || deviceEncryptionKey;
+
+              console.log('SDK OTP result:', JSON.stringify(result));
+              // For email auth, result may contain userToken directly
+              const verifiedUserToken  = result?.userToken || result?.data?.userToken || currentUserToken;
+              const verifiedEncKey     = result?.encryptionKey || result?.data?.encryptionKey || currentEncryptionKey;
+
+              // Update module-level references with verified values
+              currentUserToken = verifiedUserToken;
+              currentEncryptionKey = verifiedEncKey;
 
               if (isSignIn) {
                 // ── Sign In: OTP verified → fetch existing wallet → done ──
@@ -874,37 +929,56 @@
                 }
 
               } else {
-                // ── Sign Up: OTP verified → initialize wallet → PIN setup ──
+                // ── Sign Up: OTP verified → initialize wallet ──
                 try {
                   const initRes = await fetch(`${API_URL}/auth/initialize`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ userToken: verifiedUserToken })
                   });
-                  const { challengeId } = await initRes.json();
-                  if (!challengeId) throw new Error('Failed to get wallet challenge ID');
+                  const initJson = await initRes.json();
+                  const { challengeId } = initJson;
+                  console.log('Initialize response challengeId:', challengeId);
 
-                  sdk.setAuthentication({ userToken: verifiedUserToken, encryptionKey: verifiedEncKey });
-                  sdk.execute(challengeId, async (err2) => {
-                    if (err2) { showStepError(err2.message || String(err2)); return; }
-                    try {
+                  if (challengeId) {
+                    // Circle requires PIN/security-question challenge
+                    sdk.setAuthentication({ userToken: verifiedUserToken, encryptionKey: verifiedEncKey });
+                    sdk.execute(challengeId, async (err2, result2) => {
+                      if (err2) {
+                        console.error('SDK execute error:', err2.code, err2.message);
+                        if (err2.code === 155633 || err2.code === 155604) {
+                          // Already initialised — just fetch the wallet
+                          const wRes = await fetch(`${API_URL}/auth/wallets`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ userToken: verifiedUserToken })
+                          });
+                          const { walletAddress } = await wRes.json();
+                          if (walletAddress) { completeAuth(walletAddress); return; }
+                        }
+                        showStepError(err2.message || String(err2));
+                        return;
+                      }
+                      console.log('SDK execute result:', JSON.stringify(result2));
                       const wRes = await fetch(`${API_URL}/auth/wallets`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ userToken: verifiedUserToken })
                       });
                       const { walletAddress } = await wRes.json();
-                      if (walletAddress) {
-                        setWizardWalletAddress(walletAddress);
-                        const sessionUser = { email, walletAddress, userId: email };
-                        setCircleUser(sessionUser);
-                        sessionStorage.setItem('submanager_circle_user', JSON.stringify(sessionUser));
-                        setWizardStep(3);
-                      } else {
-                        showStepError('Wallet created but no address returned by Circle.');
-                      }
-                    } catch (e) { showStepError(e.message); }
-                  });
+                      completeAuth(walletAddress);
+                    });
+                  } else {
+                    // No challenge needed — email auth without PIN, wallet created automatically
+                    console.log('No challenge required — fetching wallet directly (email auth plan)');
+                    const wRes = await fetch(`${API_URL}/auth/wallets`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ userToken: verifiedUserToken })
+                    });
+                    const { walletAddress } = await wRes.json();
+                    completeAuth(walletAddress);
+                  }
                 } catch (e) {
                   showStepError('Failed to initialize wallet: ' + e.message);
                 }
@@ -939,7 +1013,7 @@
           const res = await fetch(`${API_URL}${endpoint}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: email, deviceId: circleDeviceId })
+            body: JSON.stringify({ userId: email, deviceId: getDeviceId() })
           });
 
           const data = await res.json();
@@ -952,6 +1026,10 @@
           setWizardEmail(email);
           setWizardUserToken(otpToken || '');
           setWizardEncryptionKey(deviceEncryptionKey || '');
+
+          // Store in module-level vars immediately so SDK callbacks have access
+          currentUserToken = otpToken || '';
+          currentEncryptionKey = deviceEncryptionKey || '';
 
           // Move to Step 2 so the SDK iframe container is rendered first
           setWizardStep(2);
