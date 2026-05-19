@@ -1,10 +1,13 @@
 {
+  "version": 2,
+  "buildCommand": "npm run vercel-build",
+  "outputDirectory": "public",
   "rewrites": [
-    { "source": "/auth/:path*", "destination": "/api/server" },
-    { "source": "/subscriptions/:path*", "destination": "/api/server" },
-    { "source": "/subscriptions", "destination": "/api/server" },
-    { "source": "/jobs", "destination": "/api/server" },
-    { "source": "/agent", "destination": "/api/server" },
+    { "source": "/api/(.*)", "destination": "/api/server" },
+    { "source": "/auth/(.*)", "destination": "/api/server" },
+    { "source": "/subscriptions(.*)", "destination": "/api/server" },
+    { "source": "/jobs(.*)", "destination": "/api/server" },
+    { "source": "/agent(.*)", "destination": "/api/server" },
     { "source": "/trigger", "destination": "/api/server" },
     { "source": "/setup-keys", "destination": "/api/server" },
     { "source": "/debug", "destination": "/api/server" }

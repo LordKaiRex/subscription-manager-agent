@@ -85,13 +85,13 @@
   <script>
   function loadCircleSDK() {
     return new Promise((resolve, reject) => {
-      if (window.W3SSdk) { resolve(window.W3SSdk); return; }
+      if (window.CircleW3s && window.CircleW3s.W3SSdk) { resolve(window.CircleW3s.W3SSdk); return; }
       const script = document.createElement('script');
       script.src = '/circle-sdk.js';
       script.onload = () => {
-        console.log('SDK loaded, W3SSdk:', typeof window.W3SSdk);
-        if (window.W3SSdk) resolve(window.W3SSdk);
-        else reject(new Error('W3SSdk not found after load'));
+        console.log('SDK loaded, CircleW3s:', typeof window.CircleW3s);
+        if (window.CircleW3s && window.CircleW3s.W3SSdk) resolve(window.CircleW3s.W3SSdk);
+        else reject(new Error('CircleW3s.W3SSdk not found after load'));
       };
       script.onerror = () => reject(new Error('Failed to load Circle SDK from local path'));
       document.head.appendChild(script);
@@ -112,7 +112,7 @@
       if (window.showStepError) window.showStepError('CIRCLE_APP_ID not configured on server');
       return;
     }
-    const sdk = new window.W3SSdk();
+    const sdk = new window.CircleW3s.W3SSdk();
     await sdk.setAppSettings({ appId });
     sdk.setAuthentication({ userToken: otpToken, encryptionKey: deviceEncryptionKey });
     sdk.execute(deviceToken, async (err, result) => {

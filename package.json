@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node --dns-result-order=ipv4first --import tsx/esm --env-file=.env src/index.ts",
     "dev": "tsx src/setup.ts && concurrently \"node --dns-result-order=ipv4first --import tsx/esm --env-file=.env src/index.ts\" \"node --dns-result-order=ipv4first --import tsx/esm --env-file=.env src/server.ts\"",
-    "server": "node --dns-result-order=ipv4first --import tsx/esm --env-file=.env src/server.ts"
+    "server": "node --dns-result-order=ipv4first --import tsx/esm --env-file=.env src/server.ts",
+    "build": "node scripts/bundle-sdk.cjs",
+    "vercel-build": "node scripts/bundle-sdk.cjs"
   },
   "keywords": [],
   "author": "",
