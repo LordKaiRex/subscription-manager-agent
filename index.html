@@ -17,9 +17,6 @@
   
   <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <!-- Circle Web SDK: pure browser postMessage implementation (CJS package cannot load in browser) -->
-
   <style>
     body { 
       font-family: 'Outfit', sans-serif; 
@@ -81,58 +78,76 @@
       }
     }
   </script>
-  <script type='module' src='/public/auth.mjs'></script>
+  <script type='module'>
+    import { W3SSdk } from 'https://esm.sh/@circle-fin/w3s-pw-web-sdk@1.1.11';
+    window.W3SSdk = W3SSdk;
+    window.circleSDKReady = true;
+    console.log('Circle SDK loaded via esm.sh:', typeof W3SSdk);
+    // Dispatch event so auth code knows SDK is ready
+    window.dispatchEvent(new Event('circleSDKReady'));
+  </script>
+
   <script>
-  async function initCircleSDK(otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) {
-    // Wait for module to load W3SSdk onto window
-    let attempts = 0;
-    while (!window.W3SSdk && attempts < 20) {
-      await new Promise(r => setTimeout(r, 250));
-      attempts++;
-    }
-    if (!window.W3SSdk) { showStepError('Circle SDK not ready — refresh page'); return; }
-
-    const appIdRes = await fetch('/auth/appid');
-    const { appId } = await appIdRes.json();
-
-    const sdk = new window.W3SSdk({
-      configs: {
-        appSettings: { appId },
-        authentication: { userToken: otpToken, encryptionKey: deviceEncryptionKey }
-      }
-    });
-
-    // verifyOtp shows the OTP input UI inside the SDK iframe
-    sdk.verifyOtp((err, result) => {
-      if (err) { showStepError(err.message); return; }
-      const userToken = result?.userToken || otpToken;
-      const encryptionKey = result?.encryptionKey || deviceEncryptionKey;
-      handlePostOTPVerification(sdk, appId, userToken, encryptionKey, email, isSignIn);
+  function waitForCircleSDK() {
+    return new Promise((resolve, reject) => {
+      if (window.W3SSdk) { resolve(window.W3SSdk); return; }
+      const timeout = setTimeout(() => reject(new Error('Circle SDK load timeout')), 15000);
+      window.addEventListener('circleSDKReady', () => {
+        clearTimeout(timeout);
+        resolve(window.W3SSdk);
+      }, { once: true });
     });
   }
 
-  async function handlePostOTPVerification(sdk, appId, userToken, encryptionKey, email, isSignIn) {
+  async function initCircleSDK(otpToken, deviceToken, deviceEncryptionKey, email, isSignIn) {
+    let SDKClass;
+    try {
+      SDKClass = await waitForCircleSDK();
+    } catch (e) {
+      showStepError('Circle SDK failed to load: ' + e.message);
+      return;
+    }
+
+    const appIdRes = await fetch('/auth/appid');
+    const { appId } = await appIdRes.json();
+    console.log('AppId:', appId, 'SDK:', typeof SDKClass);
+
+    const sdk = new SDKClass();
+    await sdk.setAppSettings({ appId });
+    sdk.setAuthentication({ userToken: otpToken, encryptionKey: deviceEncryptionKey });
+
+    sdk.verifyOtp((err, result) => {
+      if (err) { showStepError('OTP error: ' + err.message); return; }
+      const userToken = result?.userToken || otpToken;
+      const encKey = result?.encryptionKey || deviceEncryptionKey;
+      handlePostOTP(sdk, appId, userToken, encKey, email, isSignIn);
+    });
+  }
+
+  async function handlePostOTP(sdk, appId, userToken, encKey, email, isSignIn) {
     if (isSignIn) {
-      const walletsRes = await fetch('/auth/wallets', {
+      const r = await fetch('/auth/wallets', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userToken })
       });
-      const { walletAddress } = await walletsRes.json();
+      const { walletAddress } = await r.json();
       completeAuth(walletAddress, email);
     } else {
-      const initRes = await fetch('/auth/initialize', {
+      const r = await fetch('/auth/initialize', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userToken })
       });
-      const { challengeId } = await initRes.json();
-      sdk.setAuthentication({ userToken, encryptionKey });
-      sdk.execute(challengeId, async (err2) => {
+      const { challengeId } = await r.json();
+      const sdk2 = new window.W3SSdk();
+      await sdk2.setAppSettings({ appId });
+      sdk2.setAuthentication({ userToken, encryptionKey: encKey });
+      sdk2.execute(challengeId, async (err2) => {
         if (err2) { showStepError(err2.message); return; }
-        const walletsRes = await fetch('/auth/wallets', {
+        const r2 = await fetch('/auth/wallets', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userToken })
         });
-        const { walletAddress } = await walletsRes.json();
+        const { walletAddress } = await r2.json();
         completeAuth(walletAddress, email);
       });
     }
