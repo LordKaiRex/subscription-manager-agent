@@ -52,6 +52,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
+    // ── GET /debug ───────────────────────────────────────────────────────────
+    if ((resolvedPath === '/debug' || resolvedPath.includes('/debug')) && method === 'GET') {
+      res.status(200).json(safeJSON({
+        hasApiKey: !!process.env.CIRCLE_API_KEY,
+        hasAppId: !!process.env.CIRCLE_APP_ID,
+        appIdLength: (process.env.CIRCLE_APP_ID || '').length,
+        appIdPreview: (process.env.CIRCLE_APP_ID || '').substring(0, 8) + '...'
+      }));
+      return;
+    }
+
     // ── GET /auth/config ─────────────────────────────────────────────────────
     if ((resolvedPath === '/auth/config' || resolvedPath.includes('/auth/config')) && method === 'GET') {
       res.status(200).json(safeJSON({
@@ -215,6 +226,58 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
+    // ── POST /auth/verify ────────────────────────────────────────────────────
+    // Server-side OTP verification — replaces the Circle SDK iframe approach.
+    // Calls Circle's token refresh endpoint with the OTP the user typed, gets
+    // back a verified userToken, then immediately fetches the wallet address.
+    if ((resolvedPath === '/auth/verify' || resolvedPath.includes('/auth/verify')) && method === 'POST') {
+      const { otpToken, otp, deviceToken, deviceEncryptionKey } = body;
+      if (!otpToken || !otp) {
+        res.status(400).json(safeJSON({ error: 'Missing otpToken or otp' }));
+        return;
+      }
+
+      const verifyRes = await fetch('https://api.circle.com/v1/w3s/user/token/refresh', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ otpToken, otp, deviceToken, deviceEncryptionKey })
+      });
+
+      const verifyData: any = await verifyRes.json();
+      console.log('OTP verify response:', JSON.stringify(verifyData));
+      if (!verifyRes.ok) {
+        res.status(400).json(safeJSON({ error: verifyData.message || 'Invalid OTP' }));
+        return;
+      }
+
+      const { userToken, encryptionKey } = verifyData.data || {};
+      if (!userToken) {
+        res.status(400).json(safeJSON({ error: 'OTP verification did not return a userToken' }));
+        return;
+      }
+
+      // Fetch wallet address immediately so the client gets everything in one call
+      const walletsRes = await fetch('https://api.circle.com/v1/w3s/wallets?blockchain=ARC-TESTNET', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${process.env.CIRCLE_API_KEY}`,
+          'X-User-Token': userToken
+        }
+      });
+      const walletsData: any = await walletsRes.json();
+      const wallets = walletsData.data?.wallets || [];
+
+      res.status(200).json(safeJSON({
+        userToken,
+        encryptionKey: encryptionKey || null,
+        walletAddress: wallets[0]?.address || null
+      }));
+      return;
+    }
+
     // ── GET /agent ───────────────────────────────────────────────────────────
     if ((resolvedPath === '/agent' || resolvedPath.includes('/agent')) && method === 'GET') {
       let agentId = 14535n;
@@ -281,10 +344,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return;
     }
 
+    // ── PUT /subscriptions/:name ─────────────────────────────────────────────
+    if (resolvedPath.startsWith('/subscriptions/') && method === 'PUT' && !resolvedPath.endsWith('/cancel')) {
+      const targetName = decodeURIComponent(resolvedPath.split('/subscriptions/')[1].split('?')[0]);
+      const list = loadSubscriptions();
+      const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
+
+      if (!sub) {
+        res.status(404).json(safeJSON({ error: `Subscription '${targetName}' not found` }));
+        return;
+      }
+
+      const { name, cost, renewalDate } = body;
+      if (name) sub.name = name;
+      if (renewalDate) sub.renewalDate = new Date(renewalDate);
+      if (cost !== undefined) {
+        const numericCost = parseFloat(cost);
+        if (!isNaN(numericCost)) sub.amount = BigInt(Math.round(numericCost * 1_000_000));
+      }
+      saveSubscriptions(list);
+      res.status(200).json(safeJSON({ success: true, subscription: sub }));
+      return;
+    }
+
     // ── DELETE /subscriptions/:name ──────────────────────────────────────────
-    if (resolvedPath.startsWith('/subscriptions/') && method === 'DELETE') {
-      const parts = resolvedPath.split('/');
-      const targetName = decodeURIComponent(parts[2]);
+    if (resolvedPath.startsWith('/subscriptions/') && method === 'DELETE' && !resolvedPath.endsWith('/cancel')) {
+      const targetName = decodeURIComponent(resolvedPath.split('/subscriptions/')[1].split('?')[0]);
       const list = loadSubscriptions();
       const sub = list.find(s => s.name.toLowerCase() === targetName.toLowerCase());
 
